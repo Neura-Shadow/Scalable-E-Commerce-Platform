@@ -5,7 +5,7 @@
 ![Go Version](https://img.shields.io/github/go-mod/go-version/quangdangfit/goshop?style=flat-square)
 [![License](https://img.shields.io/github/license/jrapoport/gothic?style=flat-square)](https://github.com/quangdangfit/goshop/blob/master/LICENSE)
 
-Go Shop is an **open-source e-commerce backend template** written in Go with [Gin](https://github.com/gin-gonic/gin).  
+E-Commerce is an **open-source e-commerce backend template** written in Go with [Gin](https://github.com/gin-gonic/gin).  
 It demonstrates a production-ready architecture with **REST, gRPC, DDD, authentication, database, caching, Swagger docs**, and more.
 
 ---
