@@ -6,6 +6,7 @@ import (
 
 	"github.com/quangdangfit/gocommon/validation"
 
+	inventoryService "goshop/internal/inventory/service"
 	"goshop/internal/order/dto"
 	"goshop/internal/order/model"
 	"goshop/internal/order/repository"
@@ -25,17 +26,20 @@ type OrderService struct {
 	validator   validation.Validation
 	repo        repository.IOrderRepository
 	productRepo repository.IProductRepository
+	inventory   inventoryService.IInventoryService
 }
 
 func NewOrderService(
 	validator validation.Validation,
 	repo repository.IOrderRepository,
 	productRepo repository.IProductRepository,
+	inventory inventoryService.IInventoryService,
 ) *OrderService {
 	return &OrderService{
 		validator:   validator,
 		repo:        repo,
 		productRepo: productRepo,
+		inventory:   inventory,
 	}
 }
 
@@ -57,8 +61,22 @@ func (s *OrderService) PlaceOrder(ctx context.Context, req *dto.PlaceOrderReq) (
 		productMap[line.ProductID] = product
 	}
 
+	consumed := make([]*model.OrderLine, 0, len(lines))
+	for _, line := range lines {
+		if err := s.inventory.ConsumeStock(ctx, line.ProductID, int64(line.Quantity)); err != nil {
+			for _, consumedLine := range consumed {
+				_ = s.inventory.Restock(ctx, consumedLine.ProductID, int64(consumedLine.Quantity))
+			}
+			return nil, err
+		}
+		consumed = append(consumed, line)
+	}
+
 	order, err := s.repo.CreateOrder(ctx, req.UserID, lines)
 	if err != nil {
+		for _, consumedLine := range consumed {
+			_ = s.inventory.Restock(ctx, consumedLine.ProductID, int64(consumedLine.Quantity))
+		}
 		return nil, err
 	}
 
@@ -88,7 +106,7 @@ func (s *OrderService) GetMyOrders(ctx context.Context, req *dto.ListOrderReq) (
 }
 
 func (s *OrderService) CancelOrder(ctx context.Context, orderID, userID string) (*model.Order, error) {
-	order, err := s.repo.GetOrderByID(ctx, orderID, false)
+	order, err := s.repo.GetOrderByID(ctx, orderID, true)
 	if err != nil {
 		return nil, err
 	}
@@ -101,9 +119,23 @@ func (s *OrderService) CancelOrder(ctx context.Context, orderID, userID string) 
 		return nil, errors.New("invalid order status")
 	}
 
+	restocked := make([]*model.OrderLine, 0, len(order.Lines))
+	for _, line := range order.Lines {
+		if err := s.inventory.Restock(ctx, line.ProductID, int64(line.Quantity)); err != nil {
+			for _, restored := range restocked {
+				_ = s.inventory.ConsumeStock(ctx, restored.ProductID, int64(restored.Quantity))
+			}
+			return nil, err
+		}
+		restocked = append(restocked, line)
+	}
+
 	order.Status = model.OrderStatusCancelled
 	err = s.repo.UpdateOrder(ctx, order)
 	if err != nil {
+		for _, restored := range restocked {
+			_ = s.inventory.ConsumeStock(ctx, restored.ProductID, int64(restored.Quantity))
+		}
 		return nil, err
 	}
 

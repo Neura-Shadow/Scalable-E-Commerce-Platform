@@ -4,6 +4,7 @@ import (
 	"github.com/quangdangfit/gocommon/logger"
 	"github.com/quangdangfit/gocommon/validation"
 
+	inventoryModel "goshop/internal/inventory/model"
 	orderModel "goshop/internal/order/model"
 	productModel "goshop/internal/product/model"
 	grpcServer "goshop/internal/server/grpc"
@@ -40,7 +41,7 @@ func main() {
 		logger.Fatal("Cannot connect to database", err)
 	}
 
-	err = db.AutoMigrate(&userModel.User{}, &productModel.Product{}, orderModel.Order{}, orderModel.OrderLine{})
+	err = db.AutoMigrate(&userModel.User{}, &productModel.Product{}, &inventoryModel.Inventory{}, orderModel.Order{}, orderModel.OrderLine{})
 	if err != nil {
 		logger.Fatal("Database migration fail", err)
 	}
