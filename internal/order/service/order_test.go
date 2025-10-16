@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 
+	inventoryMocks "goshop/internal/inventory/service/mocks"
 	"goshop/internal/order/dto"
 	"goshop/internal/order/model"
 	"goshop/internal/order/repository/mocks"
@@ -21,6 +22,7 @@ type OrderServiceTestSuite struct {
 	suite.Suite
 	mockRepo        *mocks.IOrderRepository
 	mockProductRepo *mocks.IProductRepository
+	mockInventory   *inventoryMocks.IInventoryService
 	service         IOrderService
 }
 
@@ -30,7 +32,12 @@ func (suite *OrderServiceTestSuite) SetupTest() {
 	validator := validation.New()
 	suite.mockRepo = mocks.NewIOrderRepository(suite.T())
 	suite.mockProductRepo = mocks.NewIProductRepository(suite.T())
-	suite.service = NewOrderService(validator, suite.mockRepo, suite.mockProductRepo)
+	suite.mockInventory = &inventoryMocks.IInventoryService{}
+	suite.mockInventory.Mock.Test(suite.T())
+	suite.T().Cleanup(func() {
+		suite.mockInventory.AssertExpectations(suite.T())
+	})
+	suite.service = NewOrderService(validator, suite.mockRepo, suite.mockProductRepo, suite.mockInventory)
 }
 
 func TestOrderServiceTestSuite(t *testing.T) {
@@ -139,6 +146,8 @@ func (suite *OrderServiceTestSuite) TestPlaceOrderSuccess() {
 			Description: "product description",
 			Price:       1.1,
 		}, nil).Times(1)
+	suite.mockInventory.On("ConsumeStock", mock.Anything, "productID", int64(2)).
+		Return(nil).Times(1)
 
 	suite.mockRepo.On("CreateOrder", mock.Anything, "userID", mock.Anything).
 		Return(&model.Order{
@@ -171,7 +180,7 @@ func (suite *OrderServiceTestSuite) TestPlaceOrderGetProductByIDFail() {
 		},
 	}
 
-	suite.mockProductRepo.On("GetProductByID", mock.Anything, "productID", mock.Anything).
+	suite.mockProductRepo.On("GetProductByID", mock.Anything, "productID").
 		Return(nil, errors.New("error")).Times(1)
 
 	order, err := suite.service.PlaceOrder(context.Background(), req)
@@ -211,9 +220,38 @@ func (suite *OrderServiceTestSuite) TestPlaceOrderCreateFail() {
 			Description: "product description",
 			Price:       1.1,
 		}, nil).Times(1)
+	suite.mockInventory.On("ConsumeStock", mock.Anything, "productID", int64(2)).
+		Return(nil).Times(1)
+	suite.mockInventory.On("Restock", mock.Anything, "productID", int64(2)).
+		Return(nil).Times(1)
 
 	suite.mockRepo.On("CreateOrder", mock.Anything, "userID", mock.Anything).
 		Return(nil, errors.New("error")).Times(1)
+
+	order, err := suite.service.PlaceOrder(context.Background(), req)
+	suite.Nil(order)
+	suite.NotNil(err)
+}
+
+func (suite *OrderServiceTestSuite) TestPlaceOrderInsufficientInventory() {
+	req := &dto.PlaceOrderReq{
+		UserID: "userID",
+		Lines: []dto.PlaceOrderLineReq{
+			{
+				ProductID: "productID",
+				Quantity:  2,
+			},
+		},
+	}
+
+	suite.mockProductRepo.On("GetProductByID", mock.Anything, "productID").
+		Return(&model.Product{
+			Name:        "product",
+			Description: "product description",
+			Price:       1.1,
+		}, nil).Times(1)
+	suite.mockInventory.On("ConsumeStock", mock.Anything, "productID", int64(2)).
+		Return(errors.New("insufficient")).Times(1)
 
 	order, err := suite.service.PlaceOrder(context.Background(), req)
 	suite.Nil(order)
@@ -227,18 +265,24 @@ func (suite *OrderServiceTestSuite) TestCancelOrderSuccess() {
 	userID := "userID"
 	orderID := "orderID"
 
-	suite.mockRepo.On("GetOrderByID", mock.Anything, orderID, false).
-		Return(&model.Order{
-			UserID:     userID,
-			TotalPrice: 111.1,
-			Status:     model.OrderStatusNew,
-		}, nil).Times(1)
-
-	suite.mockRepo.On("UpdateOrder", mock.Anything, &model.Order{
+	existingOrder := &model.Order{
 		UserID:     userID,
 		TotalPrice: 111.1,
-		Status:     model.OrderStatusCancelled,
-	}).Return(nil).Times(1)
+		Status:     model.OrderStatusNew,
+		Lines: []*model.OrderLine{
+			{
+				ProductID: "productID",
+				Quantity:  2,
+			},
+		},
+	}
+
+	suite.mockRepo.On("GetOrderByID", mock.Anything, orderID, true).
+		Return(existingOrder, nil).Times(1)
+	suite.mockInventory.On("Restock", mock.Anything, "productID", int64(2)).
+		Return(nil).Times(1)
+	suite.mockRepo.On("UpdateOrder", mock.Anything, existingOrder).
+		Return(nil).Times(1)
 
 	order, err := suite.service.CancelOrder(context.Background(), orderID, userID)
 	suite.NotNil(order)
@@ -252,18 +296,26 @@ func (suite *OrderServiceTestSuite) TestCancelOrderFail() {
 	userID := "userID"
 	orderID := "orderID"
 
-	suite.mockRepo.On("GetOrderByID", mock.Anything, orderID, false).
-		Return(&model.Order{
-			UserID:     userID,
-			TotalPrice: 111.1,
-			Status:     model.OrderStatusNew,
-		}, nil).Times(1)
-
-	suite.mockRepo.On("UpdateOrder", mock.Anything, &model.Order{
+	existingOrder := &model.Order{
 		UserID:     userID,
 		TotalPrice: 111.1,
-		Status:     model.OrderStatusCancelled,
-	}).Return(errors.New("error")).Times(1)
+		Status:     model.OrderStatusNew,
+		Lines: []*model.OrderLine{
+			{
+				ProductID: "productID",
+				Quantity:  2,
+			},
+		},
+	}
+
+	suite.mockRepo.On("GetOrderByID", mock.Anything, orderID, true).
+		Return(existingOrder, nil).Times(1)
+	suite.mockInventory.On("Restock", mock.Anything, "productID", int64(2)).
+		Return(nil).Times(1)
+	suite.mockInventory.On("ConsumeStock", mock.Anything, "productID", int64(2)).
+		Return(nil).Times(1)
+	suite.mockRepo.On("UpdateOrder", mock.Anything, existingOrder).
+		Return(errors.New("error")).Times(1)
 
 	order, err := suite.service.CancelOrder(context.Background(), orderID, userID)
 	suite.Nil(order)
@@ -274,7 +326,7 @@ func (suite *OrderServiceTestSuite) TestCancelOrderDifferenceUserId() {
 	userID := "userID"
 	orderID := "orderID"
 
-	suite.mockRepo.On("GetOrderByID", mock.Anything, orderID, false).
+	suite.mockRepo.On("GetOrderByID", mock.Anything, orderID, true).
 		Return(&model.Order{
 			UserID:     "userID1",
 			TotalPrice: 111.1,
@@ -290,7 +342,7 @@ func (suite *OrderServiceTestSuite) TestCancelOrderInvalidStatus() {
 	userID := "userID"
 	orderID := "orderID"
 
-	suite.mockRepo.On("GetOrderByID", mock.Anything, orderID, false).
+	suite.mockRepo.On("GetOrderByID", mock.Anything, orderID, true).
 		Return(&model.Order{
 			UserID:     userID,
 			TotalPrice: 111.1,
@@ -306,7 +358,7 @@ func (suite *OrderServiceTestSuite) TestCancelOrderGetOrderByIDFail() {
 	userID := "userID"
 	orderID := "orderID"
 
-	suite.mockRepo.On("GetOrderByID", mock.Anything, orderID, false).
+	suite.mockRepo.On("GetOrderByID", mock.Anything, orderID, true).
 		Return(nil, errors.New("error")).Times(1)
 
 	order, err := suite.service.CancelOrder(context.Background(), orderID, userID)
