@@ -2,24 +2,12 @@ package http
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/quangdangfit/gocommon/validation"
 
-	inventoryRepository "goshop/internal/inventory/repository"
-	inventoryService "goshop/internal/inventory/service"
-	"goshop/internal/order/repository"
-	"goshop/internal/order/service"
-	"goshop/pkg/dbs"
 	"goshop/pkg/middleware"
 )
 
-func Routes(r *gin.RouterGroup, db dbs.IDatabase, validator validation.Validation) {
-	productRepo := repository.NewProductRepository(db)
-	orderRepo := repository.NewOrderRepository(db)
-	inventoryRepo := inventoryRepository.NewInventoryRepository(db)
-	inventorySvc := inventoryService.NewInventoryService(validator, inventoryRepo)
-	orderSvc := service.NewOrderService(validator, orderRepo, productRepo, inventorySvc)
-	orderHandler := NewOrderHandler(orderSvc)
-
+func Routes(r *gin.RouterGroup, orderService orderService) {
+	orderHandler := NewOrderHandler(orderService)
 	authMiddleware := middleware.JWTAuth()
 
 	orderRoute := r.Group("/orders", authMiddleware)

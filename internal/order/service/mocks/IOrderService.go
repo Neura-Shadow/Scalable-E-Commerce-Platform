@@ -79,25 +79,25 @@ func (_m *IOrderService) GetMyOrders(ctx context.Context, req *dto.ListOrderReq)
 	return r0, r1, r2
 }
 
-// GetOrderByID provides a mock function with given fields: ctx, id
-func (_m *IOrderService) GetOrderByID(ctx context.Context, id string) (*model.Order, error) {
-	ret := _m.Called(ctx, id)
+// GetOrderByID provides a mock function with given fields: ctx, id, userID
+func (_m *IOrderService) GetOrderByID(ctx context.Context, id string, userID string) (*model.Order, error) {
+	ret := _m.Called(ctx, id, userID)
 
 	var r0 *model.Order
 	var r1 error
-	if rf, ok := ret.Get(0).(func(context.Context, string) (*model.Order, error)); ok {
-		return rf(ctx, id)
+	if rf, ok := ret.Get(0).(func(context.Context, string, string) (*model.Order, error)); ok {
+		return rf(ctx, id, userID)
 	}
-	if rf, ok := ret.Get(0).(func(context.Context, string) *model.Order); ok {
-		r0 = rf(ctx, id)
+	if rf, ok := ret.Get(0).(func(context.Context, string, string) *model.Order); ok {
+		r0 = rf(ctx, id, userID)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(*model.Order)
 		}
 	}
 
-	if rf, ok := ret.Get(1).(func(context.Context, string) error); ok {
-		r1 = rf(ctx, id)
+	if rf, ok := ret.Get(1).(func(context.Context, string, string) error); ok {
+		r1 = rf(ctx, id, userID)
 	} else {
 		r1 = ret.Error(1)
 	}

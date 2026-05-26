@@ -10,14 +10,6 @@ import (
 	"goshop/pkg/utils"
 )
 
-//go:generate mockery --name=IOrderRepository
-type IOrderRepository interface {
-	CreateOrder(ctx context.Context, userID string, lines []*model.OrderLine) (*model.Order, error)
-	GetOrderByID(ctx context.Context, id string, preload bool) (*model.Order, error)
-	GetMyOrders(ctx context.Context, req *dto.ListOrderReq) ([]*model.Order, *paging.Pagination, error)
-	UpdateOrder(ctx context.Context, order *model.Order) error
-}
-
 type OrderRepo struct {
 	db dbs.IDatabase
 }
@@ -36,8 +28,8 @@ func (r *OrderRepo) CreateOrder(ctx context.Context, userID string, lines []*mod
 	order.TotalPrice = totalPrice
 	order.UserID = userID
 
-	handler := func() error {
-		return r.createOrder(ctx, order, lines)
+	handler := func(tx dbs.IDatabase) error {
+		return r.createOrder(ctx, tx, order, lines)
 	}
 
 	err := r.db.WithTransaction(handler)
@@ -48,9 +40,9 @@ func (r *OrderRepo) CreateOrder(ctx context.Context, userID string, lines []*mod
 	return order, nil
 }
 
-func (r *OrderRepo) createOrder(ctx context.Context, order *model.Order, lines []*model.OrderLine) error {
+func (r *OrderRepo) createOrder(ctx context.Context, tx dbs.IDatabase, order *model.Order, lines []*model.OrderLine) error {
 	// Create Order
-	if err := r.db.Create(ctx, order); err != nil {
+	if err := tx.Create(ctx, order); err != nil {
 		return err
 	}
 
@@ -58,7 +50,7 @@ func (r *OrderRepo) createOrder(ctx context.Context, order *model.Order, lines [
 	for _, line := range lines {
 		line.OrderID = order.ID
 	}
-	if err := r.db.CreateInBatches(ctx, &lines, len(lines)); err != nil {
+	if err := tx.CreateInBatches(ctx, &lines, len(lines)); err != nil {
 		return err
 	}
 

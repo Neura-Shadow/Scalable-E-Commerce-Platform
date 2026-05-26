@@ -15,7 +15,7 @@ const DatabaseTimeout = 5 * time.Second
 type IDatabase interface {
 	GetDB() *gorm.DB
 	AutoMigrate(models ...any) error
-	WithTransaction(function func() error) error
+	WithTransaction(function func(tx IDatabase) error) error
 	Create(ctx context.Context, doc any) error
 	CreateInBatches(ctx context.Context, docs any, batchSize int) error
 	Update(ctx context.Context, doc any) error
@@ -67,22 +67,10 @@ func (d *Database) AutoMigrate(models ...any) error {
 	return d.db.AutoMigrate(models...)
 }
 
-func (d *Database) WithTransaction(function func() error) error {
-	callback := func(db *gorm.DB) error {
-		return function()
-	}
-
-	tx := d.db.Begin()
-	if err := callback(tx); err != nil {
-		tx.Rollback()
-		return err
-	}
-
-	if err := tx.Commit().Error; err != nil {
-		return err
-	}
-
-	return nil
+func (d *Database) WithTransaction(function func(tx IDatabase) error) error {
+	return d.db.Transaction(func(tx *gorm.DB) error {
+		return function(&Database{db: tx})
+	})
 }
 
 func (d *Database) Preload(query string, args ...interface{}) IDatabase {

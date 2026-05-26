@@ -17,7 +17,7 @@ import (
 type ProductRepositoryTestSuite struct {
 	suite.Suite
 	mockDB *mocks.IDatabase
-	repo   IProductRepository
+	repo   *ProductRepo
 }
 
 func (suite *ProductRepositoryTestSuite) SetupTest() {

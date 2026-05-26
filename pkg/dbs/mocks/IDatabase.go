@@ -189,11 +189,11 @@ func (_m *IDatabase) Update(ctx context.Context, doc interface{}) error {
 }
 
 // WithTransaction provides a mock function with given fields: function
-func (_m *IDatabase) WithTransaction(function func() error) error {
+func (_m *IDatabase) WithTransaction(function func(dbs.IDatabase) error) error {
 	ret := _m.Called(function)
 
 	var r0 error
-	if rf, ok := ret.Get(0).(func(func() error) error); ok {
+	if rf, ok := ret.Get(0).(func(func(dbs.IDatabase) error) error); ok {
 		r0 = rf(function)
 	} else {
 		r0 = ret.Error(0)

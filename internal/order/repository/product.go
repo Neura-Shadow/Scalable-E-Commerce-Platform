@@ -7,11 +7,6 @@ import (
 	"goshop/pkg/dbs"
 )
 
-//go:generate mockery --name=IProductRepository
-type IProductRepository interface {
-	GetProductByID(ctx context.Context, id string) (*model.Product, error)
-}
-
 type ProductRepo struct {
 	db dbs.IDatabase
 }

@@ -4,12 +4,11 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/quangdangfit/gocommon/validation"
 
-	dbMocks "goshop/pkg/dbs/mocks"
+	"goshop/internal/order/service/mocks"
 )
 
 func TestRoutes(t *testing.T) {
-	mockDB := dbMocks.NewIDatabase(t)
-	Routes(gin.New().Group("/"), mockDB, validation.New())
+	mockService := mocks.NewIOrderService(t)
+	Routes(gin.New().Group("/"), mockService)
 }

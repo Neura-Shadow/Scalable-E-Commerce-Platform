@@ -17,12 +17,13 @@ func Routes(r *gin.RouterGroup, db dbs.IDatabase, validator validation.Validatio
 	productHandler := NewProductHandler(cache, productSvc)
 
 	authMiddleware := middleware.JWTAuth()
+	adminOnly := middleware.RequireRole("admin")
 
 	productRoute := r.Group("/products")
 	{
 		productRoute.GET("", productHandler.ListProducts)
-		productRoute.POST("", authMiddleware, productHandler.CreateProduct)
-		productRoute.PUT("/:id", authMiddleware, productHandler.UpdateProduct)
+		productRoute.POST("", authMiddleware, adminOnly, productHandler.CreateProduct)
+		productRoute.PUT("/:id", authMiddleware, adminOnly, productHandler.UpdateProduct)
 		productRoute.GET("/:id", productHandler.GetProductByID)
 	}
 }

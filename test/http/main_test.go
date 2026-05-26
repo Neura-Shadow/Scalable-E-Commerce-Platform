@@ -12,7 +12,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/quangdangfit/gocommon/logger"
 	"github.com/quangdangfit/gocommon/validation"
+	"gorm.io/gorm"
 
+	inventoryModel "goshop/internal/inventory/model"
 	orderModel "goshop/internal/order/model"
 	productModel "goshop/internal/product/model"
 	httpServer "goshop/internal/server/http"
@@ -49,10 +51,13 @@ func setup() {
 		logger.Fatal("Cannot connect to database", err)
 	}
 
-	err = dbTest.AutoMigrate(&userModel.User{}, &productModel.Product{}, orderModel.Order{}, orderModel.OrderLine{})
+	migrator := dbTest.GetDB().Migrator()
+	_ = migrator.DropTable(&orderModel.OrderLine{}, &orderModel.Order{}, &inventoryModel.Inventory{}, &productModel.Product{}, &userModel.User{})
+	err = dbTest.AutoMigrate(&userModel.User{}, &productModel.Product{}, &inventoryModel.Inventory{}, orderModel.Order{}, orderModel.OrderLine{})
 	if err != nil {
 		logger.Fatal("Database migration fail", err)
 	}
+	registerProductInventoryFixture()
 
 	validator := validation.New()
 	testCache = redis.New(redis.Config{
@@ -68,12 +73,27 @@ func setup() {
 	dbTest.Create(context.Background(), &userModel.User{
 		Email:    "test@test.com",
 		Password: "test123456",
+		Role:     userModel.UserRoleAdmin,
 	})
 }
 
 func teardown() {
 	migrator := dbTest.GetDB().Migrator()
-	migrator.DropTable(&userModel.User{}, &productModel.Product{}, &orderModel.Order{}, &orderModel.OrderLine{})
+	migrator.DropTable(&userModel.User{}, &productModel.Product{}, &inventoryModel.Inventory{}, &orderModel.Order{}, &orderModel.OrderLine{})
+}
+
+func registerProductInventoryFixture() {
+	_ = dbTest.GetDB().Callback().Create().After("gorm:create").Register("test:create_inventory_for_product", func(tx *gorm.DB) {
+		product, ok := tx.Statement.Dest.(*productModel.Product)
+		if !ok || product.ID == "" {
+			return
+		}
+
+		_ = tx.Session(&gorm.Session{NewDB: true}).Create(&inventoryModel.Inventory{
+			ProductID: product.ID,
+			Quantity:  1000000,
+		}).Error
+	})
 }
 
 func makeRequest(method, url string, body interface{}, token string) *httptest.ResponseRecorder {
@@ -119,6 +139,7 @@ func parseResponseResult(resData []byte, result interface{}) {
 
 func cleanData(records ...interface{}) {
 	dbTest.GetDB().Where("1 = 1").Delete(&orderModel.OrderLine{})
+	dbTest.GetDB().Where("1 = 1").Delete(&inventoryModel.Inventory{})
 	dbTest.GetDB().Where("1 = 1").Delete(&productModel.Product{})
 	dbTest.GetDB().Where("1 = 1").Delete(&orderModel.Order{})
 

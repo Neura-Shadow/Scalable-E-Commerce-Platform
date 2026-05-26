@@ -56,7 +56,7 @@ func (suite *OrderServiceTestSuite) TestGetOrderByIDSuccess() {
 			Status:     model.OrderStatusNew,
 		}, nil).Times(1)
 
-	order, err := suite.service.GetOrderByID(context.Background(), orderID)
+	order, err := suite.service.GetOrderByID(context.Background(), orderID, "userID")
 	suite.NotNil(order)
 	suite.Equal("userID", order.UserID)
 	suite.Equal(111.1, order.TotalPrice)
@@ -69,9 +69,23 @@ func (suite *OrderServiceTestSuite) TestGetOrderByIDFail() {
 	suite.mockRepo.On("GetOrderByID", mock.Anything, orderID, true).
 		Return(nil, errors.New("error")).Times(1)
 
-	order, err := suite.service.GetOrderByID(context.Background(), orderID)
+	order, err := suite.service.GetOrderByID(context.Background(), orderID, "userID")
 	suite.Nil(order)
 	suite.NotNil(err)
+}
+
+func (suite *OrderServiceTestSuite) TestGetOrderByIDDifferentUser() {
+	orderID := "orderID"
+	suite.mockRepo.On("GetOrderByID", mock.Anything, orderID, true).
+		Return(&model.Order{
+			UserID:     "otherUserID",
+			TotalPrice: 111.1,
+			Status:     model.OrderStatusNew,
+		}, nil).Times(1)
+
+	order, err := suite.service.GetOrderByID(context.Background(), orderID, "userID")
+	suite.Nil(order)
+	suite.ErrorIs(err, model.ErrPermissionDenied)
 }
 
 // GetMyOrders

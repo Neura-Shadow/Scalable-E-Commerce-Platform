@@ -12,13 +12,14 @@ import (
 	"goshop/internal/order/dto"
 	"goshop/internal/order/model"
 	"goshop/pkg/config"
+	"goshop/pkg/dbs"
 	"goshop/pkg/dbs/mocks"
 )
 
 type OrderRepositoryTestSuite struct {
 	suite.Suite
 	mockDB *mocks.IDatabase
-	repo   IOrderRepository
+	repo   *OrderRepo
 }
 
 func (suite *OrderRepositoryTestSuite) SetupTest() {
@@ -44,11 +45,48 @@ func (suite *OrderRepositoryTestSuite) TestCreateOrderSuccessfully() {
 		},
 	}
 
-	suite.mockDB.On("WithTransaction", mock.Anything).Return(nil).Times(1)
+	txDB := mocks.NewIDatabase(suite.T())
+	txDB.On("Create", mock.Anything, mock.AnythingOfType("*model.Order")).
+		Return(nil).Times(1)
+	txDB.On("CreateInBatches", mock.Anything, mock.Anything, len(orderLines)).
+		Return(nil).Times(1)
+
+	suite.mockDB.On("WithTransaction", mock.Anything).
+		Run(func(args mock.Arguments) {
+			handler := args.Get(0).(func(dbs.IDatabase) error)
+			suite.NoError(handler(txDB))
+		}).
+		Return(nil).Times(1)
 
 	order, err := suite.repo.CreateOrder(context.Background(), userID, orderLines)
 	suite.NotNil(order)
 	suite.Nil(err)
+}
+
+func (suite *OrderRepositoryTestSuite) TestCreateOrderRollbackOnLineCreateFail() {
+	userID := "userID"
+	orderLines := []*model.OrderLine{
+		{
+			ProductID: "productID",
+			Quantity:  2,
+		},
+	}
+	expectedErr := errors.New("line create failed")
+
+	txDB := mocks.NewIDatabase(suite.T())
+	txDB.On("Create", mock.Anything, mock.AnythingOfType("*model.Order")).
+		Return(nil).Times(1)
+	txDB.On("CreateInBatches", mock.Anything, mock.Anything, len(orderLines)).
+		Return(expectedErr).Times(1)
+
+	suite.mockDB.On("WithTransaction", mock.Anything).
+		Return(func(handler func(dbs.IDatabase) error) error {
+			return handler(txDB)
+		}).Times(1)
+
+	order, err := suite.repo.CreateOrder(context.Background(), userID, orderLines)
+	suite.Nil(order)
+	suite.ErrorIs(err, expectedErr)
 }
 
 func (suite *OrderRepositoryTestSuite) TestCreateOrderFail() {

@@ -13,7 +13,11 @@ import (
 
 	_ "goshop/docs"
 	inventoryHttp "goshop/internal/inventory/port/http"
+	inventoryRepository "goshop/internal/inventory/repository"
+	inventoryService "goshop/internal/inventory/service"
 	orderHttp "goshop/internal/order/port/http"
+	orderRepository "goshop/internal/order/repository"
+	orderService "goshop/internal/order/service"
 	productHttp "goshop/internal/product/port/http"
 	userHttp "goshop/internal/user/port/http"
 	"goshop/pkg/config"
@@ -72,7 +76,16 @@ func (s Server) MapRoutes() error {
 	v1 := s.engine.Group("/api/v1")
 	userHttp.Routes(v1, s.db, s.validator)
 	productHttp.Routes(v1, s.db, s.validator, s.cache)
-	orderHttp.Routes(v1, s.db, s.validator)
+	orderHttp.Routes(v1, s.newOrderService())
 	inventoryHttp.Routes(v1, s.db, s.validator)
 	return nil
+}
+
+func (s Server) newOrderService() orderService.IOrderService {
+	orderRepo := orderRepository.NewOrderRepository(s.db)
+	productRepo := orderRepository.NewProductRepository(s.db)
+	inventoryRepo := inventoryRepository.NewInventoryRepository(s.db)
+	inventorySvc := inventoryService.NewInventoryService(s.validator, inventoryRepo)
+
+	return orderService.NewOrderService(s.validator, orderRepo, productRepo, inventorySvc)
 }

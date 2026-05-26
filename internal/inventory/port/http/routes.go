@@ -16,12 +16,13 @@ func Routes(r *gin.RouterGroup, db dbs.IDatabase, validator validation.Validatio
 	inventoryHandler := NewInventoryHandler(inventorySvc)
 
 	authMiddleware := middleware.JWTAuth()
+	adminOnly := middleware.RequireRole("admin")
 
 	inventoryRoute := r.Group("/inventory")
 	{
 		inventoryRoute.GET("", inventoryHandler.List)
 		inventoryRoute.GET("/:product_id", inventoryHandler.Get)
-		inventoryRoute.PUT("/:product_id", authMiddleware, inventoryHandler.Set)
-		inventoryRoute.PATCH("/:product_id/adjust", authMiddleware, inventoryHandler.Adjust)
+		inventoryRoute.PUT("/:product_id", authMiddleware, adminOnly, inventoryHandler.Set)
+		inventoryRoute.PATCH("/:product_id/adjust", authMiddleware, adminOnly, inventoryHandler.Adjust)
 	}
 }

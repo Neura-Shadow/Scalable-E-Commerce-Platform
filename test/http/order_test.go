@@ -488,8 +488,8 @@ func TestOrderAPI_CancelOrderNotMine(t *testing.T) {
 	writer := makeRequest("PUT", fmt.Sprintf("/api/v1/orders/%s/cancel", o.ID), nil, accessToken())
 	var response map[string]map[string]string
 	_ = json.Unmarshal(writer.Body.Bytes(), &response)
-	assert.Equal(t, http.StatusInternalServerError, writer.Code)
-	assert.Equal(t, "Something went wrong", response["error"]["message"])
+	assert.Equal(t, http.StatusForbidden, writer.Code)
+	assert.Equal(t, "Permission denied", response["error"]["message"])
 }
 
 // List My Orders

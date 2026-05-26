@@ -209,7 +209,7 @@ func (suite *OrderHandlerTestSuite) TestOrderAPI_GetOrderByIDSuccess() {
 	ctx.Set("userId", "123456")
 	ctx.AddParam("id", "orderId1")
 
-	suite.mockService.On("GetOrderByID", mock.Anything, "orderId1").
+	suite.mockService.On("GetOrderByID", mock.Anything, "orderId1", "123456").
 		Return(
 			&model.Order{
 				ID:         "orderId1",
@@ -262,7 +262,7 @@ func (suite *OrderHandlerTestSuite) TestOrderAPI_GetOrderByIDFail() {
 	ctx.Set("userId", "123456")
 	ctx.AddParam("id", "orderId1")
 
-	suite.mockService.On("GetOrderByID", mock.Anything, "orderId1").
+	suite.mockService.On("GetOrderByID", mock.Anything, "orderId1", "123456").
 		Return(nil, errors.New("error")).Times(1)
 
 	suite.handler.GetOrderByID(ctx)
@@ -271,6 +271,22 @@ func (suite *OrderHandlerTestSuite) TestOrderAPI_GetOrderByIDFail() {
 	_ = json.Unmarshal(writer.Body.Bytes(), &res)
 	suite.Equal(http.StatusNotFound, writer.Code)
 	suite.NotNil(res.Error)
+}
+
+func (suite *OrderHandlerTestSuite) TestOrderAPI_GetOrderByIDPermissionDenied() {
+	ctx, writer := suite.prepareContext(nil)
+	ctx.Set("userId", "123456")
+	ctx.AddParam("id", "orderId1")
+
+	suite.mockService.On("GetOrderByID", mock.Anything, "orderId1", "123456").
+		Return(nil, model.ErrPermissionDenied).Times(1)
+
+	suite.handler.GetOrderByID(ctx)
+
+	var res map[string]map[string]string
+	_ = json.Unmarshal(writer.Body.Bytes(), &res)
+	suite.Equal(http.StatusForbidden, writer.Code)
+	suite.Equal("Permission denied", res["error"]["message"])
 }
 
 // GetOrders

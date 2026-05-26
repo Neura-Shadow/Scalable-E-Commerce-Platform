@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -8,16 +9,24 @@ import (
 	"github.com/quangdangfit/gocommon/logger"
 
 	"goshop/internal/order/dto"
-	"goshop/internal/order/service"
+	"goshop/internal/order/model"
+	"goshop/pkg/paging"
 	"goshop/pkg/response"
 	"goshop/pkg/utils"
 )
 
-type OrderHandler struct {
-	service service.IOrderService
+type orderService interface {
+	PlaceOrder(ctx context.Context, req *dto.PlaceOrderReq) (*model.Order, error)
+	GetOrderByID(ctx context.Context, id, userID string) (*model.Order, error)
+	GetMyOrders(ctx context.Context, req *dto.ListOrderReq) ([]*model.Order, *paging.Pagination, error)
+	CancelOrder(ctx context.Context, orderID, userID string) (*model.Order, error)
 }
 
-func NewOrderHandler(service service.IOrderService) *OrderHandler {
+type OrderHandler struct {
+	service orderService
+}
+
+func NewOrderHandler(service orderService) *OrderHandler {
 	return &OrderHandler{
 		service: service,
 	}
@@ -116,9 +125,13 @@ func (a *OrderHandler) GetOrderByID(c *gin.Context) {
 		return
 	}
 
-	order, err := a.service.GetOrderByID(c, orderId)
+	order, err := a.service.GetOrderByID(c, orderId, userId)
 	if err != nil {
 		logger.Errorf("Failed to get order, id: %s, error: %s ", orderId, err)
+		if errors.Is(err, model.ErrPermissionDenied) {
+			response.Error(c, http.StatusForbidden, err, "Permission denied")
+			return
+		}
 		response.Error(c, http.StatusNotFound, err, "Not found")
 		return
 	}
@@ -152,6 +165,10 @@ func (a *OrderHandler) CancelOrder(c *gin.Context) {
 	order, err := a.service.CancelOrder(c, orderID, userID)
 	if err != nil {
 		logger.Errorf("Failed to cancel order, id: %s, error: %s", orderID, err)
+		if errors.Is(err, model.ErrPermissionDenied) {
+			response.Error(c, http.StatusForbidden, err, "Permission denied")
+			return
+		}
 		response.Error(c, http.StatusInternalServerError, err, "Something went wrong")
 		return
 	}
