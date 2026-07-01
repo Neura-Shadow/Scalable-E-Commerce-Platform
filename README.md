@@ -10,6 +10,7 @@ The codebase is organized by feature under `internal/`:
 - `internal/product`: product catalog APIs with Redis caching.
 - `internal/inventory`: stock read/write APIs and atomic stock mutation.
 - `internal/order`: order placement, ownership checks, cancellation, and order queries.
+- `internal/outbox`: durable database-backed event records for future asynchronous publishing.
 - `internal/server`: HTTP and gRPC composition roots.
 
 The order module follows a clean dependency direction:
@@ -32,6 +33,7 @@ HTTP handler -> order service -> repository/inventory/product ports -> GORM/Redi
 - Atomic inventory deduction to prevent overselling.
 - Idempotent `POST /orders` with Redis and `Idempotency-Key`.
 - Redis-backed order-placement rate limiting.
+- Transactional outbox foundation for `order.created` events.
 - HTTP server hardening with explicit timeouts, max header size, body size limits, trusted proxy lockdown, and graceful shutdown.
 - Swagger API documentation.
 - Docker Compose for PostgreSQL and Redis.
@@ -41,7 +43,7 @@ HTTP handler -> order service -> repository/inventory/product ports -> GORM/Redi
 
 ### Transaction-Safe Ordering
 
-Order placement runs product loading, stock deduction, order creation, and order-line creation inside one Unit of Work transaction. If any step fails, the whole use case rolls back.
+Order placement runs product loading, stock deduction, order creation, order-line creation, and `order.created` outbox event creation inside one Unit of Work transaction. If any step fails, the whole use case rolls back.
 
 ### Atomic Inventory Deduction
 
@@ -69,6 +71,28 @@ Keys are scoped by authenticated user ID and stored in Redis with a TTL. Duplica
 ### Request Protection
 
 `POST /orders` is protected by a Redis-backed per-user rate limit. Defaults are documented in `pkg/config/config.sample.yaml` and `docs/order-production-readiness.md`.
+
+### Transactional Outbox
+
+Successful order placement creates one pending `order.created` row in `outbox_events` with this payload shape:
+
+```json
+{
+  "order_id": "order-id",
+  "user_id": "user-id",
+  "total_price": 125.5,
+  "status": "new",
+  "lines": [
+    {
+      "product_id": "product-id",
+      "quantity": 1,
+      "price": 125.5
+    }
+  ]
+}
+```
+
+The current implementation stores durable outbox rows and supports publish bookkeeping, retries, and `dead_letter` status. It does not yet run an external broker publisher or background worker.
 
 ## Permission Model
 
@@ -192,7 +216,7 @@ curl -X PUT http://localhost:8888/api/v1/inventory/<product_id> \
 - `docs/order-production-readiness.md`: idempotency, rate limiting, HTTP hardening, and observability.
 - `docs/load-testing.md`: load and concurrency testing guidance.
 - `docs/production-deployment.md`: production deployment checklist and operational notes.
-- `docs/order-outbox-pattern.md`: future reliable order-event publishing design.
+- `docs/order-outbox-pattern.md`: implemented transactional outbox foundation and future reliable publisher design.
 
 ## Production-Readiness Notes
 
@@ -202,4 +226,5 @@ curl -X PUT http://localhost:8888/api/v1/inventory/<product_id> \
 - Put the API behind TLS at the edge.
 - Tune order rate limits to match real checkout traffic.
 - Add persistent migrations before using this project for a long-lived production database.
-- Consider the documented Outbox Pattern before publishing order events to external systems.
+- Move the auto-migrated `outbox_events` table to explicit migrations before long-lived production use.
+- Add a separate outbox publisher worker before publishing order events to external systems.

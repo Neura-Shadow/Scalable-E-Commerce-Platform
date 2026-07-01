@@ -14,6 +14,7 @@ import (
 	"goshop/internal/order/dto"
 	"goshop/internal/order/model"
 	"goshop/internal/order/repository/mocks"
+	outboxModel "goshop/internal/outbox/model"
 	"goshop/pkg/config"
 	"goshop/pkg/paging"
 )
@@ -30,6 +31,32 @@ type recordingTransactor struct {
 	uow    UnitOfWork
 	called bool
 	err    error
+}
+
+type recordingOutbox struct {
+	events []recordedOutboxEvent
+	err    error
+}
+
+type recordedOutboxEvent struct {
+	aggregateType string
+	aggregateID   string
+	eventType     string
+	payload       any
+}
+
+func (o *recordingOutbox) CreatePending(_ context.Context, aggregateType, aggregateID, eventType string, payload any) (*outboxModel.OutboxEvent, error) {
+	o.events = append(o.events, recordedOutboxEvent{
+		aggregateType: aggregateType,
+		aggregateID:   aggregateID,
+		eventType:     eventType,
+		payload:       payload,
+	})
+	return &outboxModel.OutboxEvent{
+		AggregateType: aggregateType,
+		AggregateID:   aggregateID,
+		EventType:     eventType,
+	}, o.err
 }
 
 func (t *recordingTransactor) WithinTransaction(ctx context.Context, fn func(UnitOfWork) error) error {
@@ -195,6 +222,73 @@ func (suite *OrderServiceTestSuite) TestPlaceOrderSuccess() {
 	suite.Nil(err)
 }
 
+func (suite *OrderServiceTestSuite) TestPlaceOrderSuccessCreatesOutboxEvent() {
+	req := &dto.PlaceOrderReq{
+		UserID: "userID",
+		Lines: []dto.PlaceOrderLineReq{
+			{
+				ProductID: "productID",
+				Quantity:  2,
+			},
+		},
+	}
+	outbox := &recordingOutbox{}
+	transactor := &recordingTransactor{
+		uow: staticUnitOfWork{
+			orders:    suite.mockRepo,
+			products:  suite.mockProductRepo,
+			inventory: suite.mockInventory,
+			outbox:    outbox,
+		},
+	}
+	svc := NewOrderService(validation.New(), suite.mockRepo, suite.mockProductRepo, suite.mockInventory, transactor)
+
+	suite.mockProductRepo.On("GetProductByID", mock.Anything, "productID").
+		Return(&model.Product{
+			ID:          "productID",
+			Name:        "product",
+			Description: "product description",
+			Price:       1.1,
+		}, nil).Times(1)
+	suite.mockInventory.On("ConsumeStock", mock.Anything, "productID", int64(2)).
+		Return(nil).Times(1)
+	suite.mockRepo.On("CreateOrder", mock.Anything, "userID", mock.Anything).
+		Return(&model.Order{
+			ID:         "orderID",
+			UserID:     "userID",
+			TotalPrice: 2.2,
+			Status:     model.OrderStatusNew,
+			Lines: []*model.OrderLine{
+				{
+					ProductID: "productID",
+					Quantity:  2,
+					Price:     2.2,
+				},
+			},
+		}, nil).Times(1)
+
+	order, err := svc.PlaceOrder(context.Background(), req)
+
+	suite.NoError(err)
+	suite.NotNil(order)
+	suite.Len(outbox.events, 1)
+	event := outbox.events[0]
+	suite.Equal("order", event.aggregateType)
+	suite.Equal("orderID", event.aggregateID)
+	suite.Equal("order.created", event.eventType)
+
+	payload, ok := event.payload.(OrderCreatedPayload)
+	suite.True(ok)
+	suite.Equal("orderID", payload.OrderID)
+	suite.Equal("userID", payload.UserID)
+	suite.Equal(2.2, payload.TotalPrice)
+	suite.Equal(model.OrderStatusNew, payload.Status)
+	suite.Len(payload.Lines, 1)
+	suite.Equal("productID", payload.Lines[0].ProductID)
+	suite.Equal(uint(2), payload.Lines[0].Quantity)
+	suite.Equal(2.2, payload.Lines[0].Price)
+}
+
 func (suite *OrderServiceTestSuite) TestPlaceOrderGetProductByIDFail() {
 	req := &dto.PlaceOrderReq{
 		UserID: "userID",
@@ -295,6 +389,46 @@ func (suite *OrderServiceTestSuite) TestPlaceOrderCreateFailReturnsTransactionEr
 	suite.ErrorIs(transactor.err, expectedErr)
 }
 
+func (suite *OrderServiceTestSuite) TestPlaceOrderCreateFailDoesNotCreateOutboxEvent() {
+	req := &dto.PlaceOrderReq{
+		UserID: "userID",
+		Lines: []dto.PlaceOrderLineReq{
+			{
+				ProductID: "productID",
+				Quantity:  2,
+			},
+		},
+	}
+	outbox := &recordingOutbox{}
+	expectedErr := errors.New("create order failed")
+	transactor := &recordingTransactor{
+		uow: staticUnitOfWork{
+			orders:    suite.mockRepo,
+			products:  suite.mockProductRepo,
+			inventory: suite.mockInventory,
+			outbox:    outbox,
+		},
+	}
+	svc := NewOrderService(validation.New(), suite.mockRepo, suite.mockProductRepo, suite.mockInventory, transactor)
+
+	suite.mockProductRepo.On("GetProductByID", mock.Anything, "productID").
+		Return(&model.Product{
+			Name:        "product",
+			Description: "product description",
+			Price:       1.1,
+		}, nil).Times(1)
+	suite.mockInventory.On("ConsumeStock", mock.Anything, "productID", int64(2)).
+		Return(nil).Times(1)
+	suite.mockRepo.On("CreateOrder", mock.Anything, "userID", mock.Anything).
+		Return(nil, expectedErr).Times(1)
+
+	order, err := svc.PlaceOrder(context.Background(), req)
+
+	suite.Nil(order)
+	suite.ErrorIs(err, expectedErr)
+	suite.Empty(outbox.events)
+}
+
 func (suite *OrderServiceTestSuite) TestPlaceOrderInsufficientInventory() {
 	req := &dto.PlaceOrderReq{
 		UserID: "userID",
@@ -318,6 +452,43 @@ func (suite *OrderServiceTestSuite) TestPlaceOrderInsufficientInventory() {
 	order, err := suite.service.PlaceOrder(context.Background(), req)
 	suite.Nil(order)
 	suite.NotNil(err)
+}
+
+func (suite *OrderServiceTestSuite) TestPlaceOrderInsufficientInventoryDoesNotCreateOutboxEvent() {
+	req := &dto.PlaceOrderReq{
+		UserID: "userID",
+		Lines: []dto.PlaceOrderLineReq{
+			{
+				ProductID: "productID",
+				Quantity:  2,
+			},
+		},
+	}
+	outbox := &recordingOutbox{}
+	transactor := &recordingTransactor{
+		uow: staticUnitOfWork{
+			orders:    suite.mockRepo,
+			products:  suite.mockProductRepo,
+			inventory: suite.mockInventory,
+			outbox:    outbox,
+		},
+	}
+	svc := NewOrderService(validation.New(), suite.mockRepo, suite.mockProductRepo, suite.mockInventory, transactor)
+
+	suite.mockProductRepo.On("GetProductByID", mock.Anything, "productID").
+		Return(&model.Product{
+			Name:        "product",
+			Description: "product description",
+			Price:       1.1,
+		}, nil).Times(1)
+	suite.mockInventory.On("ConsumeStock", mock.Anything, "productID", int64(2)).
+		Return(errors.New("insufficient")).Times(1)
+
+	order, err := svc.PlaceOrder(context.Background(), req)
+
+	suite.Nil(order)
+	suite.NotNil(err)
+	suite.Empty(outbox.events)
 }
 
 // Cancel Order

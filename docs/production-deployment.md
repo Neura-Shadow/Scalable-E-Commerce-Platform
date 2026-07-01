@@ -77,7 +77,27 @@ Use this endpoint for readiness/liveness checks at the platform layer.
 
 ## Database operations
 
-The current app uses GORM auto-migration during startup. For a long-lived production database, replace startup auto-migration with explicit, reviewed migrations before scaling deployments.
+The current app uses GORM auto-migration during startup. The auto-migrated models include users, products, inventory, orders, order lines, and `outbox_events`.
+
+For a long-lived production database, replace startup auto-migration with explicit, reviewed migrations before scaling deployments. The outbox table should be managed by the same migration process as the order tables so event durability is not dependent on runtime schema changes.
+
+## Outbox operations
+
+Order placement writes one `order.created` row to `outbox_events` in the same transaction as inventory deduction, order creation, and order-line creation.
+
+Current limitations:
+
+- no external broker publisher is wired yet
+- no long-running publisher worker runs inside the API process
+- no multi-worker row locking is implemented yet
+
+Operational expectations for the future publisher:
+
+- process only `pending` rows whose `next_attempt_at` is due
+- mark successful publishes as `published`
+- increment `attempts` and reschedule transient failures
+- move exhausted events to `dead_letter`
+- alert on dead-letter growth
 
 ## Security checklist
 
@@ -98,5 +118,6 @@ The current app uses GORM auto-migration during startup. For a long-lived produc
 4. Deploy the API with new configuration.
 5. Verify `/health`.
 6. Run a smoke test for login and order placement.
-7. Monitor order failure logs, rate-limited counts, and latency.
-8. Roll back if error rate or latency exceeds the deployment threshold.
+7. Verify that successful order placement creates one pending `order.created` outbox row.
+8. Monitor order failure logs, rate-limited counts, outbox dead-letter counts, and latency.
+9. Roll back if error rate, outbox failures, or latency exceed the deployment threshold.

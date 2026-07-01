@@ -11,6 +11,25 @@ import (
 	"goshop/pkg/utils"
 )
 
+const (
+	orderAggregateType    = "order"
+	OrderCreatedEventType = "order.created"
+)
+
+type OrderCreatedPayload struct {
+	OrderID    string                    `json:"order_id"`
+	UserID     string                    `json:"user_id"`
+	TotalPrice float64                   `json:"total_price"`
+	Status     model.OrderStatus         `json:"status"`
+	Lines      []OrderCreatedLinePayload `json:"lines"`
+}
+
+type OrderCreatedLinePayload struct {
+	ProductID string  `json:"product_id"`
+	Quantity  uint    `json:"quantity"`
+	Price     float64 `json:"price"`
+}
+
 type OrderService struct {
 	validator   validation.Validation
 	repo        OrderRepository
@@ -80,6 +99,12 @@ func (s *OrderService) PlaceOrder(ctx context.Context, req *dto.PlaceOrderReq) (
 			line.Product = productMap[line.ProductID]
 		}
 
+		if outbox := uow.Outbox(); outbox != nil {
+			if _, err := outbox.CreatePending(ctx, orderAggregateType, created.ID, OrderCreatedEventType, buildOrderCreatedPayload(created)); err != nil {
+				return err
+			}
+		}
+
 		order = created
 		return nil
 	})
@@ -94,6 +119,7 @@ type staticUnitOfWork struct {
 	orders    OrderRepository
 	products  ProductRepository
 	inventory InventoryService
+	outbox    OutboxService
 }
 
 func (u staticUnitOfWork) Orders() OrderRepository {
@@ -108,12 +134,35 @@ func (u staticUnitOfWork) Inventory() InventoryService {
 	return u.inventory
 }
 
+func (u staticUnitOfWork) Outbox() OutboxService {
+	return u.outbox
+}
+
 type passthroughTransactor struct {
 	uow UnitOfWork
 }
 
 func (t passthroughTransactor) WithinTransaction(_ context.Context, fn func(UnitOfWork) error) error {
 	return fn(t.uow)
+}
+
+func buildOrderCreatedPayload(order *model.Order) OrderCreatedPayload {
+	payload := OrderCreatedPayload{
+		OrderID:    order.ID,
+		UserID:     order.UserID,
+		TotalPrice: order.TotalPrice,
+		Status:     order.Status,
+		Lines:      make([]OrderCreatedLinePayload, 0, len(order.Lines)),
+	}
+	for _, line := range order.Lines {
+		payload.Lines = append(payload.Lines, OrderCreatedLinePayload{
+			ProductID: line.ProductID,
+			Quantity:  line.Quantity,
+			Price:     line.Price,
+		})
+	}
+
+	return payload
 }
 
 func (s *OrderService) GetOrderByID(ctx context.Context, id, userID string) (*model.Order, error) {

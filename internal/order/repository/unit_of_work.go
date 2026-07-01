@@ -8,6 +8,8 @@ import (
 	inventoryRepository "goshop/internal/inventory/repository"
 	inventoryService "goshop/internal/inventory/service"
 	orderService "goshop/internal/order/service"
+	outboxRepository "goshop/internal/outbox/repository"
+	outboxService "goshop/internal/outbox/service"
 	"goshop/pkg/dbs"
 )
 
@@ -26,11 +28,13 @@ func NewUnitOfWork(db dbs.IDatabase, validator validation.Validation) *UnitOfWor
 func (u *UnitOfWork) WithinTransaction(ctx context.Context, fn func(orderService.UnitOfWork) error) error {
 	return u.db.WithTransactionContext(ctx, func(tx dbs.IDatabase) error {
 		inventoryRepo := inventoryRepository.NewInventoryRepository(tx)
+		outboxRepo := outboxRepository.NewOutboxRepository(tx)
 
 		return fn(transactionalUnitOfWork{
 			orders:    NewOrderRepository(tx),
 			products:  NewProductRepository(tx),
 			inventory: inventoryService.NewInventoryService(u.validator, inventoryRepo),
+			outbox:    outboxService.NewOutboxService(outboxRepo),
 		})
 	})
 }
@@ -39,6 +43,7 @@ type transactionalUnitOfWork struct {
 	orders    orderService.OrderRepository
 	products  orderService.ProductRepository
 	inventory orderService.InventoryService
+	outbox    orderService.OutboxService
 }
 
 func (u transactionalUnitOfWork) Orders() orderService.OrderRepository {
@@ -51,4 +56,8 @@ func (u transactionalUnitOfWork) Products() orderService.ProductRepository {
 
 func (u transactionalUnitOfWork) Inventory() orderService.InventoryService {
 	return u.inventory
+}
+
+func (u transactionalUnitOfWork) Outbox() orderService.OutboxService {
+	return u.outbox
 }

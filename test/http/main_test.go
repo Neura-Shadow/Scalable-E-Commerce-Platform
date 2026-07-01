@@ -16,6 +16,7 @@ import (
 
 	inventoryModel "goshop/internal/inventory/model"
 	orderModel "goshop/internal/order/model"
+	outboxModel "goshop/internal/outbox/model"
 	productModel "goshop/internal/product/model"
 	httpServer "goshop/internal/server/http"
 	"goshop/internal/user/dto"
@@ -53,8 +54,8 @@ func setup() {
 	}
 
 	migrator := dbTest.GetDB().Migrator()
-	_ = migrator.DropTable(&orderModel.OrderLine{}, &orderModel.Order{}, &inventoryModel.Inventory{}, &productModel.Product{}, &userModel.User{})
-	err = dbTest.AutoMigrate(&userModel.User{}, &productModel.Product{}, &inventoryModel.Inventory{}, orderModel.Order{}, orderModel.OrderLine{})
+	_ = migrator.DropTable(&outboxModel.OutboxEvent{}, &orderModel.OrderLine{}, &orderModel.Order{}, &inventoryModel.Inventory{}, &productModel.Product{}, &userModel.User{})
+	err = dbTest.AutoMigrate(&userModel.User{}, &productModel.Product{}, &inventoryModel.Inventory{}, orderModel.Order{}, orderModel.OrderLine{}, &outboxModel.OutboxEvent{})
 	if err != nil {
 		logger.Fatal("Database migration fail", err)
 	}
@@ -80,7 +81,7 @@ func setup() {
 
 func teardown() {
 	migrator := dbTest.GetDB().Migrator()
-	migrator.DropTable(&userModel.User{}, &productModel.Product{}, &inventoryModel.Inventory{}, &orderModel.Order{}, &orderModel.OrderLine{})
+	migrator.DropTable(&userModel.User{}, &productModel.Product{}, &inventoryModel.Inventory{}, &orderModel.Order{}, &orderModel.OrderLine{}, &outboxModel.OutboxEvent{})
 }
 
 func registerProductInventoryFixture() {
@@ -154,6 +155,7 @@ func parseResponseResult(resData []byte, result interface{}) {
 }
 
 func cleanData(records ...interface{}) {
+	dbTest.GetDB().Where("1 = 1").Delete(&outboxModel.OutboxEvent{})
 	dbTest.GetDB().Where("1 = 1").Delete(&orderModel.OrderLine{})
 	dbTest.GetDB().Where("1 = 1").Delete(&inventoryModel.Inventory{})
 	dbTest.GetDB().Where("1 = 1").Delete(&productModel.Product{})

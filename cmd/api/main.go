@@ -6,6 +6,7 @@ import (
 
 	inventoryModel "goshop/internal/inventory/model"
 	orderModel "goshop/internal/order/model"
+	outboxModel "goshop/internal/outbox/model"
 	productModel "goshop/internal/product/model"
 	grpcServer "goshop/internal/server/grpc"
 	httpServer "goshop/internal/server/http"
@@ -40,7 +41,7 @@ func main() {
 		logger.Fatal("Cannot connect to database", err)
 	}
 
-	err = db.AutoMigrate(&userModel.User{}, &productModel.Product{}, &inventoryModel.Inventory{}, orderModel.Order{}, orderModel.OrderLine{})
+	err = db.AutoMigrate(&userModel.User{}, &productModel.Product{}, &inventoryModel.Inventory{}, orderModel.Order{}, orderModel.OrderLine{}, &outboxModel.OutboxEvent{})
 	if err != nil {
 		logger.Fatal("Database migration fail", err)
 	}

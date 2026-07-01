@@ -1,6 +1,6 @@
 # Order Outbox Pattern
 
-The current ordering flow writes orders and order lines in a single database transaction. Future integrations such as payment, email, fulfillment, or analytics should not publish external events directly inside that transaction.
+The ordering flow writes orders, order lines, inventory mutations, and an `order.created` outbox event in one database transaction. Future integrations such as payment, email, fulfillment, or analytics should publish from the durable outbox table instead of publishing directly from the order request handler.
 
 ## Why direct publishing is risky
 
@@ -10,9 +10,25 @@ If the service commits the transaction and then fails before publishing, the ord
 
 The transactional outbox pattern solves this by writing events to an outbox table in the same database transaction as the order change.
 
-## Candidate order events
+## Implemented scope
 
-- `order.created`
+Implemented now:
+
+- `internal/outbox/model.OutboxEvent`
+- `internal/outbox/repository.IOutboxRepository`
+- `internal/outbox/service.IOutboxService`
+- `internal/outbox/service.EventPublisher`
+- `order.created` event creation inside the existing order Unit of Work transaction
+- retry bookkeeping with `attempts`, `next_attempt_at`, and `dead_letter`
+
+Not implemented yet:
+
+- external broker integration
+- long-running publisher worker
+- row-locking publisher query such as `FOR UPDATE SKIP LOCKED`
+
+## Candidate future order events
+
 - `payment.requested`
 - `inventory.reserved`
 - `order.cancelled`
@@ -36,40 +52,55 @@ CREATE TABLE outbox_events (
 );
 ```
 
-When an order is created, the transaction should write:
+When an order is created, the transaction writes:
 
-1. the order
-2. the order lines
-3. one `outbox_events` row for `order.created`
+1. product reads
+2. atomic inventory deduction
+3. the order
+4. the order lines
+5. one `outbox_events` row for `order.created`
 
-All three writes commit or roll back together.
+All writes commit or roll back together.
 
 ## Event schema example
 
 ```json
 {
-  "event_id": "2e47e7a7-8ad6-4d8d-9aa5-72fd651a18f8",
-  "event_type": "order.created",
-  "occurred_at": "2026-07-01T00:00:00Z",
-  "order": {
-    "id": "order-id",
-    "user_id": "user-id",
-    "total_price": 125.50,
-    "status": "new",
-    "lines": [
-      {
-        "product_id": "product-id",
-        "quantity": 1,
-        "price": 125.50
-      }
-    ]
-  }
+  "order_id": "order-id",
+  "user_id": "user-id",
+  "total_price": 125.5,
+  "status": "new",
+  "lines": [
+    {
+      "product_id": "product-id",
+      "quantity": 1,
+      "price": 125.5
+    }
+  ]
 }
+```
+
+The outbox row itself carries the event metadata:
+
+```text
+aggregate_type = "order"
+aggregate_id = "<order_id>"
+event_type = "order.created"
+status = "pending"
+attempts = 0
 ```
 
 ## Background publisher
 
-A separate worker should:
+The code currently defines the minimal publisher abstraction:
+
+```go
+type EventPublisher interface {
+    Publish(ctx context.Context, event *model.OutboxEvent) error
+}
+```
+
+A future separate worker should:
 
 1. select pending outbox rows whose `next_attempt_at <= now()`
 2. publish each event to the message broker
@@ -85,15 +116,22 @@ Consumers should store processed `event_id` values or use natural idempotency ke
 
 ## Retry strategy
 
-Use bounded exponential backoff:
+The current service records failures by incrementing `attempts` and scheduling `next_attempt_at`. The default foundation uses a bounded retry count and moves exhausted events to `dead_letter`.
+
+Future production workers should add:
 
 - short retry delay for transient broker/network errors
 - maximum attempt count
 - dead-letter status after repeated failures
+- visibility into last error details if the schema is extended
 
 ## Dead-letter handling
 
 Dead-lettered events should be visible in logs and dashboards. Operators should be able to inspect the payload, understand the failure, and manually retry after fixing the root cause.
+
+## Migration note
+
+The current application uses GORM `AutoMigrate`, and `cmd/api/main.go` includes `OutboxEvent` in that startup migration list. For a long-lived production database, move the outbox table to explicit reviewed migrations before running multiple production instances.
 
 ## Reliability benefit
 

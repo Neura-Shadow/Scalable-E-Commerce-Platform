@@ -5,6 +5,7 @@ import (
 
 	"goshop/internal/order/dto"
 	"goshop/internal/order/model"
+	outboxModel "goshop/internal/outbox/model"
 	"goshop/pkg/paging"
 )
 
@@ -27,6 +28,7 @@ type UnitOfWork interface {
 	Orders() OrderRepository
 	Products() ProductRepository
 	Inventory() InventoryService
+	Outbox() OutboxService
 }
 
 type OrderRepository interface {
@@ -43,4 +45,8 @@ type ProductRepository interface {
 type InventoryService interface {
 	ConsumeStock(ctx context.Context, productID string, quantity int64) error
 	Restock(ctx context.Context, productID string, quantity int64) error
+}
+
+type OutboxService interface {
+	CreatePending(ctx context.Context, aggregateType, aggregateID, eventType string, payload any) (*outboxModel.OutboxEvent, error)
 }

@@ -14,6 +14,7 @@ import (
 	inventoryModel "goshop/internal/inventory/model"
 	"goshop/internal/order/dto"
 	"goshop/internal/order/model"
+	outboxModel "goshop/internal/outbox/model"
 	productModel "goshop/internal/product/model"
 	userModel "goshop/internal/user/model"
 	"goshop/pkg/jtoken"
@@ -65,6 +66,110 @@ func TestOrderAPI_PlaceOrderSuccess(t *testing.T) {
 	assert.Equal(t, req.Lines[1].ProductID, res.Lines[1].Product.ID)
 	assert.Equal(t, req.Lines[1].Quantity, res.Lines[1].Quantity)
 	assert.Equal(t, float64(6), res.Lines[1].Price)
+}
+
+func TestOrderAPI_PlaceOrderCreatesOutboxEvent(t *testing.T) {
+	defer cleanData()
+
+	u := userModel.User{
+		Email:    "outbox-customer@test.com",
+		Password: "test123456",
+		Role:     userModel.UserRoleCustomer,
+	}
+	dbTest.Create(context.Background(), &u)
+	defer cleanData(&u)
+
+	p := productModel.Product{
+		Name:        "outbox-product",
+		Description: "outbox-product",
+		Price:       2,
+	}
+	dbTest.Create(context.Background(), &p)
+
+	req := &dto.PlaceOrderReq{
+		Lines: []dto.PlaceOrderLineReq{
+			{
+				ProductID: p.ID,
+				Quantity:  3,
+			},
+		},
+	}
+	writer := makeRequest("POST", "/api/v1/orders", req, tokenForUser(&u))
+	var order dto.Order
+	parseResponseResult(writer.Body.Bytes(), &order)
+	assert.Equal(t, http.StatusOK, writer.Code)
+
+	var event outboxModel.OutboxEvent
+	err := dbTest.GetDB().
+		Where("aggregate_type = ? AND aggregate_id = ? AND event_type = ?", "order", order.ID, "order.created").
+		First(&event).Error
+	assert.NoError(t, err)
+	assert.Equal(t, outboxModel.OutboxEventStatusPending, event.Status)
+	assert.Equal(t, 0, event.Attempts)
+	assert.Nil(t, event.PublishedAt)
+
+	var payload struct {
+		OrderID    string  `json:"order_id"`
+		UserID     string  `json:"user_id"`
+		TotalPrice float64 `json:"total_price"`
+		Status     string  `json:"status"`
+		Lines      []struct {
+			ProductID string  `json:"product_id"`
+			Quantity  uint    `json:"quantity"`
+			Price     float64 `json:"price"`
+		} `json:"lines"`
+	}
+	assert.NoError(t, json.Unmarshal(event.Payload, &payload))
+	assert.Equal(t, order.ID, payload.OrderID)
+	assert.Equal(t, u.ID, payload.UserID)
+	assert.Equal(t, float64(6), payload.TotalPrice)
+	assert.Equal(t, "new", payload.Status)
+	assert.Len(t, payload.Lines, 1)
+	assert.Equal(t, p.ID, payload.Lines[0].ProductID)
+	assert.Equal(t, uint(3), payload.Lines[0].Quantity)
+	assert.Equal(t, float64(6), payload.Lines[0].Price)
+}
+
+func TestOrderAPI_InventoryFailureDoesNotCommitOutboxEvent(t *testing.T) {
+	defer cleanData()
+
+	u := userModel.User{
+		Email:    "outbox-no-stock@test.com",
+		Password: "test123456",
+		Role:     userModel.UserRoleCustomer,
+	}
+	dbTest.Create(context.Background(), &u)
+	defer cleanData(&u)
+
+	p := productModel.Product{
+		Name:        "outbox-no-stock-product",
+		Description: "outbox-no-stock-product",
+		Price:       2,
+	}
+	dbTest.Create(context.Background(), &p)
+	dbTest.GetDB().
+		Model(&inventoryModel.Inventory{}).
+		Where("product_id = ?", p.ID).
+		Update("quantity", int64(0))
+
+	req := &dto.PlaceOrderReq{
+		Lines: []dto.PlaceOrderLineReq{
+			{
+				ProductID: p.ID,
+				Quantity:  1,
+			},
+		},
+	}
+	writer := makeRequest("POST", "/api/v1/orders", req, tokenForUser(&u))
+	assert.Equal(t, http.StatusConflict, writer.Code)
+
+	var outboxCount int64
+	dbTest.GetDB().Model(&outboxModel.OutboxEvent{}).Where("event_type = ?", "order.created").Count(&outboxCount)
+	assert.Equal(t, int64(0), outboxCount)
+
+	var orderCount int64
+	dbTest.GetDB().Model(&model.Order{}).Where("user_id = ?", u.ID).Count(&orderCount)
+	assert.Equal(t, int64(0), orderCount)
 }
 
 func TestOrderAPI_PlaceOrderInvalidFieldType(t *testing.T) {
