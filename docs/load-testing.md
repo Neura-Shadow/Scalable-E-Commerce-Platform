@@ -11,6 +11,14 @@ docker compose -f docker-compose.yml up -d
 go run cmd/api/main.go
 ```
 
+The outbox background publisher is disabled by default. To include Redis Streams publishing in a local load run, set:
+
+```yaml
+outbox_publisher_enabled: true
+outbox_publisher_type: redis_stream
+outbox_redis_stream_name: stream:orders
+```
+
 Create or seed:
 
 - one customer account
@@ -99,3 +107,24 @@ At minimum, record:
 - order count for the tested user
 
 The final stock quantity must never be negative.
+
+## Optional outbox publisher check
+
+When Redis Streams publishing is enabled during a load run, successful orders should eventually create entries in the configured stream and mark their outbox rows as `published`.
+
+Useful checks:
+
+```bash
+redis-cli XLEN stream:orders
+redis-cli XRANGE stream:orders - +
+```
+
+Track:
+
+- stream length growth
+- outbox publish failure count
+- dead-letter count
+- publisher batch latency
+- oldest pending outbox row age
+
+This repository does not yet include a downstream Redis Streams consumer. A future consumer group load test should use group `order-events`, claim stale pending entries, process messages idempotently by `event_id`, acknowledge after side effects commit, and route poison messages to `stream:orders:dead_letter`.

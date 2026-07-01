@@ -24,6 +24,7 @@ type IRedis interface {
 	SetWithExpiration(key string, value interface{}, expiration time.Duration) error
 	SetNXWithExpiration(key string, value interface{}, expiration time.Duration) (bool, error)
 	IncrementWithExpiration(key string, expiration time.Duration) (int64, error)
+	XAdd(ctx context.Context, stream string, values map[string]interface{}) (string, error)
 	Remove(keys ...string) error
 	Keys(pattern string) ([]string, error)
 	RemovePattern(pattern string) error
@@ -130,6 +131,16 @@ func (r *redis) IncrementWithExpiration(key string, expiration time.Duration) (i
 	}
 
 	return count, nil
+}
+
+func (r *redis) XAdd(ctx context.Context, stream string, values map[string]interface{}) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, Timeout*time.Second)
+	defer cancel()
+
+	return r.cmd.XAdd(ctx, &goredis.XAddArgs{
+		Stream: stream,
+		Values: values,
+	}).Result()
 }
 
 func (r *redis) Set(key string, value interface{}) error {

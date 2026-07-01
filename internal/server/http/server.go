@@ -66,7 +66,10 @@ func (s Server) Run() error {
 		log.Fatalf("MapRoutes Error: %v", err)
 	}
 	s.engine.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
-	stopOutboxPublisher := s.startOutboxPublisher()
+	stopOutboxPublisher, err := s.startOutboxPublisher()
+	if err != nil {
+		return err
+	}
 	defer stopOutboxPublisher()
 
 	// Start http server
@@ -129,15 +132,30 @@ func (s Server) newOrderService() orderService.IOrderService {
 	return orderService.NewOrderService(s.validator, orderRepo, productRepo, inventorySvc, orderUOW)
 }
 
-func (s Server) startOutboxPublisher() context.CancelFunc {
+func (s Server) newOutboxPublisher() (outboxService.EventPublisher, error) {
+	switch publisherType := config.OutboxPublisherType(); publisherType {
+	case config.OutboxPublisherTypeLog:
+		return outboxService.NewLogPublisher(), nil
+	case config.OutboxPublisherTypeRedisStream:
+		return outboxService.NewRedisStreamPublisher(s.cache, config.OutboxRedisStreamName()), nil
+	default:
+		return nil, fmt.Errorf("unknown outbox publisher type %q", publisherType)
+	}
+}
+
+func (s Server) startOutboxPublisher() (context.CancelFunc, error) {
 	ctx, cancel := context.WithCancel(context.Background())
+	publisher, err := s.newOutboxPublisher()
+	if err != nil {
+		return cancel, err
+	}
 	if !config.OutboxPublisherEnabled() {
-		return cancel
+		return cancel, nil
 	}
 
 	worker := outboxService.NewPublisherWorker(
 		outboxRepository.NewTransactor(s.db),
-		outboxService.NewLogPublisher(),
+		publisher,
 		outboxService.WithPublisherBatchSize(config.OutboxPublishBatchSize()),
 		outboxService.WithPublisherMaxAttempts(config.OutboxPublishMaxAttempts()),
 		outboxService.WithPublisherRetryBase(config.OutboxPublishRetryBase()),
@@ -169,5 +187,5 @@ func (s Server) startOutboxPublisher() context.CancelFunc {
 		}
 	}()
 
-	return cancel
+	return cancel, nil
 }

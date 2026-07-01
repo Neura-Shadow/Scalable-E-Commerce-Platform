@@ -7,12 +7,14 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
 
 	"github.com/quangdangfit/gocommon/logger"
 	"goshop/internal/outbox/model"
 	"goshop/pkg/config"
+	redisMocks "goshop/pkg/redis/mocks"
 )
 
 func init() {
@@ -116,6 +118,79 @@ func TestPublisherWorkerRunOnceMovesExhaustedFailureToDeadLetter(t *testing.T) {
 	assert.Equal(t, 1, result.Failed)
 	assert.Equal(t, 3, repo.events[event.ID].Attempts)
 	assert.Equal(t, model.OutboxEventStatusDeadLetter, repo.events[event.ID].Status)
+}
+
+func TestPublisherWorkerRunOnceMarksEventPublishedAfterRedisStreamPublishSucceeds(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	event := &model.OutboxEvent{
+		ID:            "evt-redis",
+		AggregateType: "order",
+		AggregateID:   "order-1",
+		EventType:     "order.created",
+		Payload:       datatypes.JSON([]byte(`{"order_id":"order-1"}`)),
+		Status:        model.OutboxEventStatusPending,
+		NextAttemptAt: now,
+		CreatedAt:     now,
+	}
+	repo := newFakeOutboxRepository(event)
+	cache := redisMocks.NewIRedis(t)
+	cache.On("XAdd", mock.Anything, "stream:orders", mock.AnythingOfType("map[string]interface {}")).
+		Return("1700000000000-0", nil).
+		Once()
+	worker := NewPublisherWorker(
+		&fakeOutboxTransactor{repo: repo},
+		NewRedisStreamPublisher(cache, "stream:orders"),
+		WithPublisherNow(func() time.Time { return now }),
+		WithPublisherBatchSize(10),
+	)
+
+	result, err := worker.RunOnce(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Published)
+	assert.Equal(t, 0, result.Failed)
+	assert.Equal(t, model.OutboxEventStatusPublished, repo.events[event.ID].Status)
+	require.NotNil(t, repo.events[event.ID].PublishedAt)
+	assert.Equal(t, now, *repo.events[event.ID].PublishedAt)
+}
+
+func TestPublisherWorkerRunOnceSchedulesRetryWhenRedisStreamPublishFails(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	retryDelay := 5 * time.Minute
+	publishErr := errors.New("redis unavailable")
+	event := &model.OutboxEvent{
+		ID:            "evt-redis-fail",
+		AggregateType: "order",
+		AggregateID:   "order-1",
+		EventType:     "order.created",
+		Payload:       datatypes.JSON([]byte(`{"order_id":"order-1"}`)),
+		Status:        model.OutboxEventStatusPending,
+		Attempts:      0,
+		NextAttemptAt: now,
+		CreatedAt:     now,
+	}
+	repo := newFakeOutboxRepository(event)
+	cache := redisMocks.NewIRedis(t)
+	cache.On("XAdd", mock.Anything, "stream:orders", mock.AnythingOfType("map[string]interface {}")).
+		Return("", publishErr).
+		Once()
+	worker := NewPublisherWorker(
+		&fakeOutboxTransactor{repo: repo},
+		NewRedisStreamPublisher(cache, "stream:orders"),
+		WithPublisherNow(func() time.Time { return now }),
+		WithPublisherRetryBase(retryDelay),
+		WithPublisherMaxAttempts(3),
+		WithPublisherBatchSize(10),
+	)
+
+	result, err := worker.RunOnce(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+	assert.Equal(t, 0, result.Published)
+	assert.Equal(t, 1, repo.events[event.ID].Attempts)
+	assert.Equal(t, model.OutboxEventStatusPending, repo.events[event.ID].Status)
+	assert.Equal(t, now.Add(retryDelay), repo.events[event.ID].NextAttemptAt)
 }
 
 func TestPublisherWorkerRunOnceRespectsBatchSize(t *testing.T) {

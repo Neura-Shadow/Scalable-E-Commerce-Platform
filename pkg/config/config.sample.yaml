@@ -21,6 +21,8 @@ order_rate_limit_limit: 120
 order_rate_limit_window_seconds: 60
 
 outbox_publisher_enabled: false
+outbox_publisher_type: log
+outbox_redis_stream_name: stream:orders
 outbox_publish_batch_size: 100
 outbox_publish_max_attempts: 3
 outbox_publish_retry_base_seconds: 60

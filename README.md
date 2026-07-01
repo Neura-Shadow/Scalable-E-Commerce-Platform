@@ -10,7 +10,7 @@ The codebase is organized by feature under `internal/`:
 - `internal/product`: product catalog APIs with Redis caching.
 - `internal/inventory`: stock read/write APIs and atomic stock mutation.
 - `internal/order`: order placement, ownership checks, cancellation, and order queries.
-- `internal/outbox`: durable database-backed event records for future asynchronous publishing.
+- `internal/outbox`: durable database-backed event records with log and Redis Streams publisher options.
 - `internal/server`: HTTP and gRPC composition roots.
 
 The order module follows a clean dependency direction:
@@ -34,7 +34,7 @@ HTTP handler -> order service -> repository/inventory/product ports -> GORM/Redi
 - Idempotent `POST /orders` with Redis and `Idempotency-Key`.
 - Redis-backed order-placement rate limiting.
 - Transactional outbox foundation for `order.created` events.
-- Optional no-op/log outbox publisher worker with retry and dead-letter bookkeeping.
+- Optional log or Redis Streams outbox publisher worker with retry and dead-letter bookkeeping.
 - HTTP server hardening with explicit timeouts, max header size, body size limits, trusted proxy lockdown, and graceful shutdown.
 - Swagger API documentation.
 - Docker Compose for PostgreSQL and Redis.
@@ -94,6 +94,16 @@ Successful order placement creates one pending `order.created` row in `outbox_ev
 ```
 
 The current implementation stores durable outbox rows and supports publish bookkeeping, retries, and `dead_letter` status. It also provides a controlled `RunOnce` publisher worker and optional background startup controlled by `outbox_publisher_enabled`, which defaults to `false`.
+
+The default publisher type is `log`, which records event metadata only. Redis Streams can be enabled when Redis should receive durable stream entries:
+
+```yaml
+outbox_publisher_enabled: true
+outbox_publisher_type: redis_stream
+outbox_redis_stream_name: stream:orders
+```
+
+The Redis Streams publisher writes `event_id`, `aggregate_type`, `aggregate_id`, `event_type`, `payload`, and `created_at` with `XADD`. A downstream consumer service is not implemented yet; see `docs/order-outbox-pattern.md` for the planned consumer group design.
 
 ## Permission Model
 
@@ -215,9 +225,9 @@ curl -X PUT http://localhost:8888/api/v1/inventory/<product_id> \
 
 - `docs/order-transaction-safety.md`: transaction boundary and overselling prevention.
 - `docs/order-production-readiness.md`: idempotency, rate limiting, HTTP hardening, and observability.
-- `docs/load-testing.md`: load and concurrency testing guidance.
+- `docs/load-testing.md`: load, concurrency, and optional outbox publisher testing guidance.
 - `docs/production-deployment.md`: production deployment checklist and operational notes.
-- `docs/order-outbox-pattern.md`: implemented transactional outbox foundation and future reliable publisher design.
+- `docs/order-outbox-pattern.md`: transactional outbox foundation, Redis Streams publishing, and future consumer design.
 - `docs/migrations/outbox_events.sql`: production-style outbox table and index migration reference.
 
 ## Production-Readiness Notes
@@ -229,4 +239,4 @@ curl -X PUT http://localhost:8888/api/v1/inventory/<product_id> \
 - Tune order rate limits to match real checkout traffic.
 - Add persistent migrations before using this project for a long-lived production database.
 - Move the auto-migrated `outbox_events` table to explicit migrations before long-lived production use.
-- Replace the no-op/log outbox publisher with a real broker adapter before publishing order events to external systems.
+- Use the Redis Streams outbox publisher when order events must leave the database, and add a consumer service before treating downstream processing as complete.

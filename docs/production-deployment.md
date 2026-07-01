@@ -41,6 +41,8 @@ order_idempotency_ttl_seconds
 order_rate_limit_limit
 order_rate_limit_window_seconds
 outbox_publisher_enabled
+outbox_publisher_type
+outbox_redis_stream_name
 outbox_publish_batch_size
 outbox_publish_max_attempts
 outbox_publish_retry_base_seconds
@@ -94,19 +96,30 @@ Order placement writes one `order.created` row to `outbox_events` in the same tr
 
 Current behavior:
 
-- no external broker publisher is wired yet
+- supported publisher types are `log` and `redis_stream`
 - optional background publisher startup is controlled by `outbox_publisher_enabled`
-- default startup leaves the publisher disabled
+- default startup leaves the publisher disabled and uses `outbox_publisher_type=log`
 - pending batch fetches use `FOR UPDATE SKIP LOCKED`
 - the no-op/log publisher logs event metadata only and does not log payloads
+- the Redis Streams publisher writes event metadata and JSON payloads to `outbox_redis_stream_name`
 
-Operational expectations for the future publisher:
+Enable Redis Streams publishing with:
+
+```yaml
+outbox_publisher_enabled: true
+outbox_publisher_type: redis_stream
+outbox_redis_stream_name: stream:orders
+```
+
+Operational expectations for the publisher:
 
 - process only `pending` rows whose `next_attempt_at` is due
 - mark successful publishes as `published`
 - increment `attempts` and reschedule transient failures
 - move exhausted events to `dead_letter`
 - alert on dead-letter growth
+
+The repository does not yet include a Redis Streams consumer service. The future consumer should use the `order-events` consumer group, process messages idempotently by `event_id`, inspect and claim stale pending entries with `XPENDING`/`XAUTOCLAIM`, acknowledge only after side effects commit, and move poison messages to `stream:orders:dead_letter` after bounded retries.
 
 Recommended outbox metrics:
 
@@ -137,5 +150,6 @@ Recommended outbox metrics:
 5. Verify `/health`.
 6. Run a smoke test for login and order placement.
 7. Verify that successful order placement creates one pending `order.created` outbox row.
-8. Monitor order failure logs, rate-limited counts, outbox dead-letter counts, and latency.
-9. Roll back if error rate, outbox failures, or latency exceed the deployment threshold.
+8. If Redis Streams publishing is enabled, verify that `stream:orders` receives an entry and the outbox row is marked `published`.
+9. Monitor order failure logs, rate-limited counts, outbox dead-letter counts, stream length, pending entries, and latency.
+10. Roll back if error rate, outbox failures, or latency exceed the deployment threshold.

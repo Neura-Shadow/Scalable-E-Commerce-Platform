@@ -19,13 +19,14 @@ Implemented now:
 - `internal/outbox/service.IOutboxService`
 - `internal/outbox/service.EventPublisher`
 - `internal/outbox/service.PublisherWorker`
+- Redis Streams `EventPublisher` adapter backed by `pkg/redis.IRedis.XAdd`
 - `order.created` event creation inside the existing order Unit of Work transaction
 - retry bookkeeping with `attempts`, `next_attempt_at`, and `dead_letter`
 - locked pending-event batch fetching with `FOR UPDATE SKIP LOCKED`
 
 Not implemented yet:
 
-- external broker integration
+- downstream Redis Streams consumer service
 - always-on publisher startup by default
 
 ## Candidate future order events
@@ -107,13 +108,36 @@ Relevant config values:
 
 ```text
 outbox_publisher_enabled = false
+outbox_publisher_type = log
+outbox_redis_stream_name = stream:orders
 outbox_publish_batch_size = 100
 outbox_publish_max_attempts = 3
 outbox_publish_retry_base_seconds = 60
 outbox_publish_interval_seconds = 30
 ```
 
-The current default publisher is a no-op/log publisher. It logs event metadata such as event type and aggregate ID, and it does not log full payloads.
+Supported publisher types are `log` and `redis_stream`. The current default publisher is `log`, which records event metadata such as event type and aggregate ID, and does not log full payloads.
+
+Enable Redis Streams publishing locally with:
+
+```yaml
+outbox_publisher_enabled: true
+outbox_publisher_type: redis_stream
+outbox_redis_stream_name: stream:orders
+```
+
+When `redis_stream` is selected, the worker publishes each due outbox row with Redis Streams `XADD`. The stream entry contains:
+
+```text
+event_id
+aggregate_type
+aggregate_id
+event_type
+payload
+created_at
+```
+
+The payload is included as JSON in the stream entry, but payload contents are not logged by the publisher.
 
 The worker:
 
@@ -128,6 +152,18 @@ Locked fetches use `FOR UPDATE SKIP LOCKED` so multiple enabled workers can avoi
 ## Idempotent consumers
 
 Consumers should store processed `event_id` values or use natural idempotency keys. This protects downstream services from duplicate delivery caused by publisher retries.
+
+The planned Redis Streams consumer design is:
+
+- stream: `stream:orders`
+- group name: `order-events`
+- consumer names: one stable name per worker process or pod
+- idempotency: persist or cache processed `event_id` before applying side effects
+- pending entries: use `XPENDING` and claim stale entries with `XAUTOCLAIM`
+- retry and ack: acknowledge with `XACK` only after idempotent side effects commit
+- dead-letter stream: move poison messages to `stream:orders:dead_letter` after bounded delivery attempts
+
+No consumer service is implemented in this repository yet. The current Redis Streams adapter only publishes outbox rows into the configured stream.
 
 ## Retry strategy
 

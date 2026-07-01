@@ -3,6 +3,8 @@
 package mocks
 
 import (
+	context "context"
+
 	mock "github.com/stretchr/testify/mock"
 
 	time "time"
@@ -55,6 +57,30 @@ func (_m *IRedis) IncrementWithExpiration(key string, expiration time.Duration) 
 	var r1 error
 	if rf, ok := ret.Get(1).(func(string, time.Duration) error); ok {
 		r1 = rf(key, expiration)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// XAdd provides a mock function with given fields: ctx, stream, values
+func (_m *IRedis) XAdd(ctx context.Context, stream string, values map[string]interface{}) (string, error) {
+	ret := _m.Called(ctx, stream, values)
+
+	var r0 string
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, string, map[string]interface{}) (string, error)); ok {
+		return rf(ctx, stream, values)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, string, map[string]interface{}) string); ok {
+		r0 = rf(ctx, stream, values)
+	} else {
+		r0 = ret.Get(0).(string)
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, string, map[string]interface{}) error); ok {
+		r1 = rf(ctx, stream, values)
 	} else {
 		r1 = ret.Error(1)
 	}
