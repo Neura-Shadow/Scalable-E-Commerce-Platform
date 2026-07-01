@@ -18,14 +18,15 @@ Implemented now:
 - `internal/outbox/repository.IOutboxRepository`
 - `internal/outbox/service.IOutboxService`
 - `internal/outbox/service.EventPublisher`
+- `internal/outbox/service.PublisherWorker`
 - `order.created` event creation inside the existing order Unit of Work transaction
 - retry bookkeeping with `attempts`, `next_attempt_at`, and `dead_letter`
+- locked pending-event batch fetching with `FOR UPDATE SKIP LOCKED`
 
 Not implemented yet:
 
 - external broker integration
-- long-running publisher worker
-- row-locking publisher query such as `FOR UPDATE SKIP LOCKED`
+- always-on publisher startup by default
 
 ## Candidate future order events
 
@@ -100,15 +101,29 @@ type EventPublisher interface {
 }
 ```
 
-A future separate worker should:
+The operational worker can run one controlled batch through `PublisherWorker.RunOnce(ctx)`. Optional background startup is controlled by config and is disabled by default.
+
+Relevant config values:
+
+```text
+outbox_publisher_enabled = false
+outbox_publish_batch_size = 100
+outbox_publish_max_attempts = 3
+outbox_publish_retry_base_seconds = 60
+outbox_publish_interval_seconds = 30
+```
+
+The current default publisher is a no-op/log publisher. It logs event metadata such as event type and aggregate ID, and it does not log full payloads.
+
+The worker:
 
 1. select pending outbox rows whose `next_attempt_at <= now()`
-2. publish each event to the message broker
+2. publish each event through the configured `EventPublisher`
 3. mark successful rows as published
 4. increment attempts and set `next_attempt_at` with backoff for failures
 5. move exhausted events to a dead-letter state
 
-Use row locking such as `FOR UPDATE SKIP LOCKED` if multiple publishers run concurrently.
+Locked fetches use `FOR UPDATE SKIP LOCKED` so multiple enabled workers can avoid claiming the same pending rows while a batch transaction is active.
 
 ## Idempotent consumers
 
@@ -129,9 +144,22 @@ Future production workers should add:
 
 Dead-lettered events should be visible in logs and dashboards. Operators should be able to inspect the payload, understand the failure, and manually retry after fixing the root cause.
 
+## Observability
+
+Recommended metrics and logs:
+
+- `outbox_pending_count`
+- `outbox_published_count`
+- `outbox_publish_failed_count`
+- `outbox_dead_letter_count`
+- `outbox_publish_latency_ms`
+- `outbox_oldest_pending_age_seconds`
+
+Current logs include batch completion counts, publish failures, event type, event ID, and aggregate ID. Payloads are intentionally not logged by default.
+
 ## Migration note
 
-The current application uses GORM `AutoMigrate`, and `cmd/api/main.go` includes `OutboxEvent` in that startup migration list. For a long-lived production database, move the outbox table to explicit reviewed migrations before running multiple production instances.
+The current application uses GORM `AutoMigrate`, and `cmd/api/main.go` includes `OutboxEvent` in that startup migration list. For a long-lived production database, move the outbox table to explicit reviewed migrations before running multiple production instances. Use `docs/migrations/outbox_events.sql` as the production migration reference.
 
 ## Reliability benefit
 

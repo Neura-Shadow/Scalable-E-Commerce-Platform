@@ -40,6 +40,11 @@ max_request_body_bytes
 order_idempotency_ttl_seconds
 order_rate_limit_limit
 order_rate_limit_window_seconds
+outbox_publisher_enabled
+outbox_publish_batch_size
+outbox_publish_max_attempts
+outbox_publish_retry_base_seconds
+outbox_publish_interval_seconds
 ```
 
 ## Build
@@ -81,15 +86,19 @@ The current app uses GORM auto-migration during startup. The auto-migrated model
 
 For a long-lived production database, replace startup auto-migration with explicit, reviewed migrations before scaling deployments. The outbox table should be managed by the same migration process as the order tables so event durability is not dependent on runtime schema changes.
 
+Use `docs/migrations/outbox_events.sql` as the production migration reference for the outbox table and indexes.
+
 ## Outbox operations
 
 Order placement writes one `order.created` row to `outbox_events` in the same transaction as inventory deduction, order creation, and order-line creation.
 
-Current limitations:
+Current behavior:
 
 - no external broker publisher is wired yet
-- no long-running publisher worker runs inside the API process
-- no multi-worker row locking is implemented yet
+- optional background publisher startup is controlled by `outbox_publisher_enabled`
+- default startup leaves the publisher disabled
+- pending batch fetches use `FOR UPDATE SKIP LOCKED`
+- the no-op/log publisher logs event metadata only and does not log payloads
 
 Operational expectations for the future publisher:
 
@@ -98,6 +107,15 @@ Operational expectations for the future publisher:
 - increment `attempts` and reschedule transient failures
 - move exhausted events to `dead_letter`
 - alert on dead-letter growth
+
+Recommended outbox metrics:
+
+- `outbox_pending_count`
+- `outbox_published_count`
+- `outbox_publish_failed_count`
+- `outbox_dead_letter_count`
+- `outbox_publish_latency_ms`
+- `outbox_oldest_pending_age_seconds`
 
 ## Security checklist
 

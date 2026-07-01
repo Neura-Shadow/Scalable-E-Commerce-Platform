@@ -16,15 +16,19 @@ const (
 	DatabaseTimeout    = 5 * time.Second
 	ProductCachingTime = 1 * time.Minute
 
-	DefaultHTTPReadTimeoutSeconds       = 10
-	DefaultHTTPWriteTimeoutSeconds      = 30
-	DefaultHTTPIdleTimeoutSeconds       = 60
-	DefaultHTTPReadHeaderTimeoutSeconds = 5
-	DefaultHTTPMaxHeaderBytes           = 1 << 20
-	DefaultMaxRequestBodyBytes          = 1 << 20
-	DefaultOrderIdempotencyTTLSeconds   = 24 * 60 * 60
-	DefaultOrderRateLimitLimit          = 120
-	DefaultOrderRateLimitWindowSeconds  = 60
+	DefaultHTTPReadTimeoutSeconds        = 10
+	DefaultHTTPWriteTimeoutSeconds       = 30
+	DefaultHTTPIdleTimeoutSeconds        = 60
+	DefaultHTTPReadHeaderTimeoutSeconds  = 5
+	DefaultHTTPMaxHeaderBytes            = 1 << 20
+	DefaultMaxRequestBodyBytes           = 1 << 20
+	DefaultOrderIdempotencyTTLSeconds    = 24 * 60 * 60
+	DefaultOrderRateLimitLimit           = 120
+	DefaultOrderRateLimitWindowSeconds   = 60
+	DefaultOutboxPublishBatchSize        = 100
+	DefaultOutboxPublishMaxAttempts      = 3
+	DefaultOutboxPublishRetryBaseSeconds = 60
+	DefaultOutboxPublishIntervalSeconds  = 30
 )
 
 var AuthIgnoreMethods = []string{
@@ -52,6 +56,12 @@ type Schema struct {
 	OrderIdempotencyTTLSeconds  int   `env:"order_idempotency_ttl_seconds"`
 	OrderRateLimitLimit         int64 `env:"order_rate_limit_limit"`
 	OrderRateLimitWindowSeconds int   `env:"order_rate_limit_window_seconds"`
+
+	OutboxPublisherEnabled        bool `env:"outbox_publisher_enabled"`
+	OutboxPublishBatchSize        int  `env:"outbox_publish_batch_size"`
+	OutboxPublishMaxAttempts      int  `env:"outbox_publish_max_attempts"`
+	OutboxPublishRetryBaseSeconds int  `env:"outbox_publish_retry_base_seconds"`
+	OutboxPublishIntervalSeconds  int  `env:"outbox_publish_interval_seconds"`
 }
 
 var (
@@ -121,6 +131,32 @@ func OrderRateLimitLimit() int64 {
 
 func OrderRateLimitWindow() time.Duration {
 	return secondsOrDefault(cfg.OrderRateLimitWindowSeconds, DefaultOrderRateLimitWindowSeconds)
+}
+
+func OutboxPublisherEnabled() bool {
+	return cfg.OutboxPublisherEnabled
+}
+
+func OutboxPublishBatchSize() int {
+	if cfg.OutboxPublishBatchSize <= 0 {
+		return DefaultOutboxPublishBatchSize
+	}
+	return cfg.OutboxPublishBatchSize
+}
+
+func OutboxPublishMaxAttempts() int {
+	if cfg.OutboxPublishMaxAttempts <= 0 {
+		return DefaultOutboxPublishMaxAttempts
+	}
+	return cfg.OutboxPublishMaxAttempts
+}
+
+func OutboxPublishRetryBase() time.Duration {
+	return secondsOrDefault(cfg.OutboxPublishRetryBaseSeconds, DefaultOutboxPublishRetryBaseSeconds)
+}
+
+func OutboxPublishInterval() time.Duration {
+	return secondsOrDefault(cfg.OutboxPublishIntervalSeconds, DefaultOutboxPublishIntervalSeconds)
 }
 
 func secondsOrDefault(value, defaultValue int) time.Duration {

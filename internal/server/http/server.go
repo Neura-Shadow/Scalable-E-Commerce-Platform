@@ -24,6 +24,8 @@ import (
 	orderHttp "goshop/internal/order/port/http"
 	orderRepository "goshop/internal/order/repository"
 	orderService "goshop/internal/order/service"
+	outboxRepository "goshop/internal/outbox/repository"
+	outboxService "goshop/internal/outbox/service"
 	productHttp "goshop/internal/product/port/http"
 	userHttp "goshop/internal/user/port/http"
 	"goshop/pkg/config"
@@ -64,6 +66,8 @@ func (s Server) Run() error {
 		log.Fatalf("MapRoutes Error: %v", err)
 	}
 	s.engine.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+	stopOutboxPublisher := s.startOutboxPublisher()
+	defer stopOutboxPublisher()
 
 	// Start http server
 	logger.Info("HTTP server is listening on PORT: ", s.cfg.HttpPort)
@@ -123,4 +127,47 @@ func (s Server) newOrderService() orderService.IOrderService {
 	orderUOW := orderRepository.NewUnitOfWork(s.db, s.validator)
 
 	return orderService.NewOrderService(s.validator, orderRepo, productRepo, inventorySvc, orderUOW)
+}
+
+func (s Server) startOutboxPublisher() context.CancelFunc {
+	ctx, cancel := context.WithCancel(context.Background())
+	if !config.OutboxPublisherEnabled() {
+		return cancel
+	}
+
+	worker := outboxService.NewPublisherWorker(
+		outboxRepository.NewTransactor(s.db),
+		outboxService.NewLogPublisher(),
+		outboxService.WithPublisherBatchSize(config.OutboxPublishBatchSize()),
+		outboxService.WithPublisherMaxAttempts(config.OutboxPublishMaxAttempts()),
+		outboxService.WithPublisherRetryBase(config.OutboxPublishRetryBase()),
+	)
+	interval := config.OutboxPublishInterval()
+	ticker := time.NewTicker(interval)
+
+	go func() {
+		defer ticker.Stop()
+		for {
+			result, err := worker.RunOnce(ctx)
+			if err != nil {
+				logger.Error("outbox_publisher_batch_failed", err)
+			} else if result.Fetched > 0 {
+				logger.Info(
+					"outbox_publisher_batch_complete fetched=", result.Fetched,
+					" published=", result.Published,
+					" failed=", result.Failed,
+					" dead_lettered=", result.DeadLettered,
+					" latency_ms=", result.Latency.Milliseconds(),
+				)
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+
+	return cancel
 }

@@ -2,12 +2,15 @@ package repository
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 
 	"goshop/internal/outbox/model"
 	dbMocks "goshop/pkg/dbs/mocks"
@@ -51,6 +54,28 @@ func TestListPendingReadyUsesPendingReadyQuery(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, expected, events)
+}
+
+func TestPendingReadyLockedQueryUsesForUpdateSkipLocked(t *testing.T) {
+	gormDB, err := gorm.Open(postgres.New(postgres.Config{
+		DSN:                  "host=localhost user=test dbname=test",
+		PreferSimpleProtocol: true,
+	}), &gorm.Config{DryRun: true, DisableAutomaticPing: true})
+	require.NoError(t, err)
+
+	var events []*model.OutboxEvent
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	stmt := pendingReadyQuery(gormDB, context.Background(), now, 25, true).
+		Find(&events).
+		Statement
+
+	sql := strings.ToUpper(stmt.SQL.String())
+	assert.Contains(t, sql, "FOR UPDATE SKIP LOCKED")
+	assert.Contains(t, sql, "ORDER BY CREATED_AT")
+	assert.Contains(t, sql, "LIMIT 25")
+	assert.Len(t, stmt.Vars, 2)
+	assert.Equal(t, model.OutboxEventStatusPending, stmt.Vars[0])
+	assert.Equal(t, now, stmt.Vars[1])
 }
 
 func TestMarkPublishedLoadsAndUpdatesEvent(t *testing.T) {

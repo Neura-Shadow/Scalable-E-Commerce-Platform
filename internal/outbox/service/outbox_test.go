@@ -57,6 +57,10 @@ func (r *fakeOutboxRepository) ListPendingReady(_ context.Context, now time.Time
 	return ready, nil
 }
 
+func (r *fakeOutboxRepository) ListPendingReadyLocked(ctx context.Context, now time.Time, limit int) ([]*model.OutboxEvent, error) {
+	return r.ListPendingReady(ctx, now, limit)
+}
+
 func (r *fakeOutboxRepository) MarkPublished(_ context.Context, eventID string, publishedAt time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -125,7 +129,8 @@ func TestListPendingReadyReturnsReadyPendingEvents(t *testing.T) {
 	ready := &model.OutboxEvent{ID: "ready", Status: model.OutboxEventStatusPending, NextAttemptAt: now.Add(-time.Second)}
 	future := &model.OutboxEvent{ID: "future", Status: model.OutboxEventStatusPending, NextAttemptAt: now.Add(time.Minute)}
 	published := &model.OutboxEvent{ID: "published", Status: model.OutboxEventStatusPublished, NextAttemptAt: now.Add(-time.Second)}
-	repo := newFakeOutboxRepository(ready, future, published)
+	deadLetter := &model.OutboxEvent{ID: "dead-letter", Status: model.OutboxEventStatusDeadLetter, NextAttemptAt: now.Add(-time.Second)}
+	repo := newFakeOutboxRepository(ready, future, published, deadLetter)
 	svc := NewOutboxService(repo, WithNow(func() time.Time { return now }))
 
 	events, err := svc.ListPendingReady(context.Background(), 10)
@@ -133,6 +138,21 @@ func TestListPendingReadyReturnsReadyPendingEvents(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, events, 1)
 	assert.Equal(t, "ready", events[0].ID)
+}
+
+func TestListPendingReadyRespectsBatchSize(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	repo := newFakeOutboxRepository(
+		&model.OutboxEvent{ID: "ready-1", Status: model.OutboxEventStatusPending, NextAttemptAt: now},
+		&model.OutboxEvent{ID: "ready-2", Status: model.OutboxEventStatusPending, NextAttemptAt: now},
+		&model.OutboxEvent{ID: "ready-3", Status: model.OutboxEventStatusPending, NextAttemptAt: now},
+	)
+	svc := NewOutboxService(repo, WithNow(func() time.Time { return now }))
+
+	events, err := svc.ListPendingReady(context.Background(), 2)
+
+	require.NoError(t, err)
+	assert.Len(t, events, 2)
 }
 
 func TestPublishMarksEventPublished(t *testing.T) {

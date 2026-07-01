@@ -19,3 +19,9 @@ max_request_body_bytes: 1048576
 order_idempotency_ttl_seconds: 86400
 order_rate_limit_limit: 120
 order_rate_limit_window_seconds: 60
+
+outbox_publisher_enabled: false
+outbox_publish_batch_size: 100
+outbox_publish_max_attempts: 3
+outbox_publish_retry_base_seconds: 60
+outbox_publish_interval_seconds: 30

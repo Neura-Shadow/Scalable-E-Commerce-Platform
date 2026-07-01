@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"goshop/internal/outbox/model"
 	"goshop/pkg/dbs"
 )
@@ -12,6 +14,7 @@ import (
 type IOutboxRepository interface {
 	CreatePending(ctx context.Context, event *model.OutboxEvent) error
 	ListPendingReady(ctx context.Context, now time.Time, limit int) ([]*model.OutboxEvent, error)
+	ListPendingReadyLocked(ctx context.Context, now time.Time, limit int) ([]*model.OutboxEvent, error)
 	MarkPublished(ctx context.Context, eventID string, publishedAt time.Time) error
 	MarkPublishFailed(ctx context.Context, eventID string, nextAttemptAt time.Time) error
 	MarkDeadLetter(ctx context.Context, eventID string) error
@@ -44,6 +47,15 @@ func (r *OutboxRepo) ListPendingReady(ctx context.Context, now time.Time, limit 
 		dbs.WithLimit(limit),
 	)
 	if err != nil {
+		return nil, err
+	}
+
+	return events, nil
+}
+
+func (r *OutboxRepo) ListPendingReadyLocked(ctx context.Context, now time.Time, limit int) ([]*model.OutboxEvent, error) {
+	var events []*model.OutboxEvent
+	if err := pendingReadyQuery(r.db.GetDB(), ctx, now, limit, true).Find(&events).Error; err != nil {
 		return nil, err
 	}
 
@@ -90,4 +102,20 @@ func (r *OutboxRepo) getByID(ctx context.Context, eventID string) (*model.Outbox
 	}
 
 	return &event, nil
+}
+
+func pendingReadyQuery(db *gorm.DB, ctx context.Context, now time.Time, limit int, locked bool) *gorm.DB {
+	if limit <= 0 {
+		limit = 100
+	}
+
+	query := db.WithContext(ctx).
+		Where("status = ? AND next_attempt_at <= ?", model.OutboxEventStatusPending, now).
+		Order("created_at").
+		Limit(limit)
+	if locked {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"})
+	}
+
+	return query
 }
