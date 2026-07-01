@@ -21,6 +21,14 @@ func NewInventoryHandler(service service.IInventoryService) *InventoryHandler {
 	return &InventoryHandler{service: service}
 }
 
+// List godoc
+//
+//	@Summary	list inventory
+//	@Tags		inventory
+//	@Produce	json
+//	@Param		product_id	query		string	false	"Product ID"
+//	@Success	200			{object}	dto.ListInventoryRes
+//	@Router		/api/v1/inventory [get]
 func (h *InventoryHandler) List(c *gin.Context) {
 	var req dto.ListInventoryReq
 	if err := c.ShouldBindQuery(&req); err != nil {
@@ -42,6 +50,14 @@ func (h *InventoryHandler) List(c *gin.Context) {
 	response.JSON(c, http.StatusOK, res)
 }
 
+// Get godoc
+//
+//	@Summary	get inventory by product id
+//	@Tags		inventory
+//	@Produce	json
+//	@Param		product_id	path		string	true	"Product ID"
+//	@Success	200			{object}	dto.Inventory
+//	@Router		/api/v1/inventory/{product_id} [get]
 func (h *InventoryHandler) Get(c *gin.Context) {
 	productID := c.Param("product_id")
 	item, err := h.service.GetByProductID(c, productID)
@@ -62,6 +78,18 @@ func (h *InventoryHandler) Get(c *gin.Context) {
 	response.JSON(c, http.StatusOK, res)
 }
 
+// Set godoc
+//
+//	@Summary	set inventory stock
+//	@Description	Admin-only stock replacement for one product.
+//	@Tags		inventory
+//	@Produce	json
+//	@Security	ApiKeyAuth
+//	@Param		product_id	path		string				true	"Product ID"
+//	@Param		_			body		dto.SetInventoryReq	true	"Body"
+//	@Success	200			{object}	dto.Inventory
+//	@Failure	403			{object}	response.Response	"Permission denied"
+//	@Router		/api/v1/inventory/{product_id} [put]
 func (h *InventoryHandler) Set(c *gin.Context) {
 	productID := c.Param("product_id")
 	var req dto.SetInventoryReq
@@ -84,6 +112,18 @@ func (h *InventoryHandler) Set(c *gin.Context) {
 	response.JSON(c, http.StatusOK, res)
 }
 
+// Adjust godoc
+//
+//	@Summary	adjust inventory stock
+//	@Description	Admin-only stock delta adjustment for one product.
+//	@Tags		inventory
+//	@Produce	json
+//	@Security	ApiKeyAuth
+//	@Param		product_id	path		string					true	"Product ID"
+//	@Param		_			body		dto.AdjustInventoryReq	true	"Body"
+//	@Success	200			{object}	dto.Inventory
+//	@Failure	403			{object}	response.Response	"Permission denied"
+//	@Router		/api/v1/inventory/{product_id}/adjust [patch]
 func (h *InventoryHandler) Adjust(c *gin.Context) {
 	productID := c.Param("product_id")
 	var req dto.AdjustInventoryReq

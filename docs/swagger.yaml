@@ -1,5 +1,12 @@
 basePath: /api/v1
 definitions:
+  dto.AdjustInventoryReq:
+    properties:
+      quantity_delta:
+        type: integer
+    required:
+    - quantity_delta
+    type: object
   dto.ChangePasswordReq:
     properties:
       new_password:
@@ -21,6 +28,22 @@ definitions:
     required:
     - description
     - name
+    type: object
+  dto.Inventory:
+    properties:
+      product_id:
+        type: string
+      quantity:
+        type: integer
+    type: object
+  dto.ListInventoryRes:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/dto.Inventory'
+        type: array
+      pagination:
+        $ref: '#/definitions/paging.Pagination'
     type: object
   dto.ListOrderRes:
     properties:
@@ -57,7 +80,7 @@ definitions:
       refresh_token:
         type: string
       user:
-        $ref: '#/definitions/dto.User'
+        $ref: '#/definitions/internal_user_dto.User'
     type: object
   dto.Order:
     properties:
@@ -119,7 +142,17 @@ definitions:
   dto.RegisterRes:
     properties:
       user:
-        $ref: '#/definitions/dto.User'
+        $ref: '#/definitions/internal_user_dto.User'
+    type: object
+  dto.SetInventoryReq:
+    properties:
+      product_id:
+        type: string
+      quantity:
+        minimum: 0
+        type: integer
+    required:
+    - product_id
     type: object
   dto.UpdateProductReq:
     properties:
@@ -130,17 +163,6 @@ definitions:
       price:
         minimum: 0
         type: number
-    type: object
-  dto.User:
-    properties:
-      created_at:
-        type: string
-      email:
-        type: string
-      id:
-        type: string
-      updated_at:
-        type: string
     type: object
   internal_order_dto.Product:
     properties:
@@ -172,6 +194,17 @@ definitions:
       updated_at:
         type: string
     type: object
+  internal_user_dto.User:
+    properties:
+      created_at:
+        type: string
+      email:
+        type: string
+      id:
+        type: string
+      updated_at:
+        type: string
+    type: object
   paging.Pagination:
     properties:
       current_page:
@@ -185,16 +218,22 @@ definitions:
       total_page:
         type: integer
     type: object
+  response.Response:
+    properties:
+      error: {}
+      result: {}
+    type: object
 info:
   contact:
-    email: quangdangfit@gmail.com
-    name: Quang Dang
-  description: Swagger API for GoShop.
+    name: Neura Shadow
+  description: REST API for a production-minded Go e-commerce backend with transaction-safe
+    orders, atomic inventory deduction, idempotent order creation, and admin/customer
+    permissions.
   license:
     name: MIT
-    url: https://github.com/MartinHeinz/go-project-blueprint/blob/master/LICENSE
+    url: https://github.com/Neura-Shadow/Scalable-E-Commerce-Platform
   termsOfService: http://swagger.io/terms/
-  title: GoShop Swagger API
+  title: Scalable E-Commerce Platform API
   version: "1.0"
 paths:
   /api/v1/auth/change-password:
@@ -241,7 +280,7 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/dto.User'
+            $ref: '#/definitions/internal_user_dto.User'
       security:
       - ApiKeyAuth: []
       summary: get my profile
@@ -266,6 +305,102 @@ paths:
       summary: Register new user
       tags:
       - users
+  /api/v1/inventory:
+    get:
+      parameters:
+      - description: Product ID
+        in: query
+        name: product_id
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/dto.ListInventoryRes'
+      summary: list inventory
+      tags:
+      - inventory
+  /api/v1/inventory/{product_id}:
+    get:
+      parameters:
+      - description: Product ID
+        in: path
+        name: product_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/dto.Inventory'
+      summary: get inventory by product id
+      tags:
+      - inventory
+    put:
+      description: Admin-only stock replacement for one product.
+      parameters:
+      - description: Product ID
+        in: path
+        name: product_id
+        required: true
+        type: string
+      - description: Body
+        in: body
+        name: _
+        required: true
+        schema:
+          $ref: '#/definitions/dto.SetInventoryReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/dto.Inventory'
+        "403":
+          description: Permission denied
+          schema:
+            $ref: '#/definitions/response.Response'
+      security:
+      - ApiKeyAuth: []
+      summary: set inventory stock
+      tags:
+      - inventory
+  /api/v1/inventory/{product_id}/adjust:
+    patch:
+      description: Admin-only stock delta adjustment for one product.
+      parameters:
+      - description: Product ID
+        in: path
+        name: product_id
+        required: true
+        type: string
+      - description: Body
+        in: body
+        name: _
+        required: true
+        schema:
+          $ref: '#/definitions/dto.AdjustInventoryReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/dto.Inventory'
+        "403":
+          description: Permission denied
+          schema:
+            $ref: '#/definitions/response.Response'
+      security:
+      - ApiKeyAuth: []
+      summary: adjust inventory stock
+      tags:
+      - inventory
   /api/v1/orders:
     get:
       parameters:
@@ -288,7 +423,13 @@ paths:
       tags:
       - orders
     post:
+      description: Creates an order for the authenticated customer. Optional Idempotency-Key
+        is scoped per user and prevents duplicate order creation.
       parameters:
+      - description: Optional idempotency key scoped to the authenticated user
+        in: header
+        name: Idempotency-Key
+        type: string
       - description: Body
         in: body
         name: _
@@ -302,6 +443,14 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/dto.Order'
+        "409":
+          description: Duplicate request, in-flight request, or insufficient stock
+          schema:
+            $ref: '#/definitions/response.Response'
+        "429":
+          description: Too many order placement requests
+          schema:
+            $ref: '#/definitions/response.Response'
       security:
       - ApiKeyAuth: []
       summary: place order
@@ -356,6 +505,7 @@ paths:
       tags:
       - products
     post:
+      description: Admin-only product creation.
       parameters:
       - description: Body
         in: body
@@ -365,7 +515,11 @@ paths:
           $ref: '#/definitions/dto.CreateProductReq'
       produces:
       - application/json
-      responses: {}
+      responses:
+        "403":
+          description: Permission denied
+          schema:
+            $ref: '#/definitions/response.Response'
       security:
       - ApiKeyAuth: []
       summary: create product
@@ -386,6 +540,7 @@ paths:
       tags:
       - products
     put:
+      description: Admin-only product update.
       parameters:
       - description: Product ID
         in: path
@@ -400,7 +555,11 @@ paths:
           $ref: '#/definitions/dto.UpdateProductReq'
       produces:
       - application/json
-      responses: {}
+      responses:
+        "403":
+          description: Permission denied
+          schema:
+            $ref: '#/definitions/response.Response'
       security:
       - ApiKeyAuth: []
       summary: update product

@@ -15,16 +15,15 @@ import (
 	"goshop/pkg/redis"
 )
 
-//	@title			GoShop Swagger API
+//	@title			Scalable E-Commerce Platform API
 //	@version		1.0
-//	@description	Swagger API for GoShop.
+//	@description	REST API for a production-minded Go e-commerce backend with transaction-safe orders, atomic inventory deduction, idempotent order creation, and admin/customer permissions.
 //	@termsOfService	http://swagger.io/terms/
 
-//	@contact.name	Quang Dang
-//	@contact.email	quangdangfit@gmail.com
+//	@contact.name	Neura Shadow
 
 //	@license.name	MIT
-//	@license.url	https://github.com/MartinHeinz/go-project-blueprint/blob/master/LICENSE
+//	@license.url	https://github.com/Neura-Shadow/Scalable-E-Commerce-Platform
 
 //	@securityDefinitions.apikey	ApiKeyAuth
 //	@in							header

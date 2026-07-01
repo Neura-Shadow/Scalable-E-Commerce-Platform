@@ -1,16 +1,15 @@
 {
     "swagger": "2.0",
     "info": {
-        "description": "Swagger API for GoShop.",
-        "title": "GoShop Swagger API",
+        "description": "REST API for a production-minded Go e-commerce backend with transaction-safe orders, atomic inventory deduction, idempotent order creation, and admin/customer permissions.",
+        "title": "Scalable E-Commerce Platform API",
         "termsOfService": "http://swagger.io/terms/",
         "contact": {
-            "name": "Quang Dang",
-            "email": "quangdangfit@gmail.com"
+            "name": "Neura Shadow"
         },
         "license": {
             "name": "MIT",
-            "url": "https://github.com/MartinHeinz/go-project-blueprint/blob/master/LICENSE"
+            "url": "https://github.com/Neura-Shadow/Scalable-E-Commerce-Platform"
         },
         "version": "1.0"
     },
@@ -92,7 +91,7 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/dto.User"
+                            "$ref": "#/definitions/internal_user_dto.User"
                         }
                     }
                 }
@@ -123,6 +122,157 @@
                         "description": "OK",
                         "schema": {
                             "$ref": "#/definitions/dto.RegisterRes"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/inventory": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "inventory"
+                ],
+                "summary": "list inventory",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Product ID",
+                        "name": "product_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/dto.ListInventoryRes"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/inventory/{product_id}": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "inventory"
+                ],
+                "summary": "get inventory by product id",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Product ID",
+                        "name": "product_id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/dto.Inventory"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
+                "description": "Admin-only stock replacement for one product.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "inventory"
+                ],
+                "summary": "set inventory stock",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Product ID",
+                        "name": "product_id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Body",
+                        "name": "_",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/dto.SetInventoryReq"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/dto.Inventory"
+                        }
+                    },
+                    "403": {
+                        "description": "Permission denied",
+                        "schema": {
+                            "$ref": "#/definitions/response.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/inventory/{product_id}/adjust": {
+            "patch": {
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
+                "description": "Admin-only stock delta adjustment for one product.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "inventory"
+                ],
+                "summary": "adjust inventory stock",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Product ID",
+                        "name": "product_id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Body",
+                        "name": "_",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/dto.AdjustInventoryReq"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/dto.Inventory"
+                        }
+                    },
+                    "403": {
+                        "description": "Permission denied",
+                        "schema": {
+                            "$ref": "#/definitions/response.Response"
                         }
                     }
                 }
@@ -169,6 +319,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Creates an order for the authenticated customer. Optional Idempotency-Key is scoped per user and prevents duplicate order creation.",
                 "produces": [
                     "application/json"
                 ],
@@ -177,6 +328,12 @@
                 ],
                 "summary": "place order",
                 "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Optional idempotency key scoped to the authenticated user",
+                        "name": "Idempotency-Key",
+                        "in": "header"
+                    },
                     {
                         "description": "Body",
                         "name": "_",
@@ -192,6 +349,18 @@
                         "description": "OK",
                         "schema": {
                             "$ref": "#/definitions/dto.Order"
+                        }
+                    },
+                    "409": {
+                        "description": "Duplicate request, in-flight request, or insufficient stock",
+                        "schema": {
+                            "$ref": "#/definitions/response.Response"
+                        }
+                    },
+                    "429": {
+                        "description": "Too many order placement requests",
+                        "schema": {
+                            "$ref": "#/definitions/response.Response"
                         }
                     }
                 }
@@ -280,6 +449,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Admin-only product creation.",
                 "produces": [
                     "application/json"
                 ],
@@ -298,7 +468,14 @@
                         }
                     }
                 ],
-                "responses": {}
+                "responses": {
+                    "403": {
+                        "description": "Permission denied",
+                        "schema": {
+                            "$ref": "#/definitions/response.Response"
+                        }
+                    }
+                }
             }
         },
         "/api/v1/products/{id}": {
@@ -327,6 +504,7 @@
                         "ApiKeyAuth": []
                     }
                 ],
+                "description": "Admin-only product update.",
                 "produces": [
                     "application/json"
                 ],
@@ -352,11 +530,29 @@
                         }
                     }
                 ],
-                "responses": {}
+                "responses": {
+                    "403": {
+                        "description": "Permission denied",
+                        "schema": {
+                            "$ref": "#/definitions/response.Response"
+                        }
+                    }
+                }
             }
         }
     },
     "definitions": {
+        "dto.AdjustInventoryReq": {
+            "type": "object",
+            "required": [
+                "quantity_delta"
+            ],
+            "properties": {
+                "quantity_delta": {
+                    "type": "integer"
+                }
+            }
+        },
         "dto.ChangePasswordReq": {
             "type": "object",
             "required": [
@@ -387,6 +583,31 @@
                 },
                 "price": {
                     "type": "number"
+                }
+            }
+        },
+        "dto.Inventory": {
+            "type": "object",
+            "properties": {
+                "product_id": {
+                    "type": "string"
+                },
+                "quantity": {
+                    "type": "integer"
+                }
+            }
+        },
+        "dto.ListInventoryRes": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/dto.Inventory"
+                    }
+                },
+                "pagination": {
+                    "$ref": "#/definitions/paging.Pagination"
                 }
             }
         },
@@ -443,7 +664,7 @@
                     "type": "string"
                 },
                 "user": {
-                    "$ref": "#/definitions/dto.User"
+                    "$ref": "#/definitions/internal_user_dto.User"
                 }
             }
         },
@@ -537,7 +758,22 @@
             "type": "object",
             "properties": {
                 "user": {
-                    "$ref": "#/definitions/dto.User"
+                    "$ref": "#/definitions/internal_user_dto.User"
+                }
+            }
+        },
+        "dto.SetInventoryReq": {
+            "type": "object",
+            "required": [
+                "product_id"
+            ],
+            "properties": {
+                "product_id": {
+                    "type": "string"
+                },
+                "quantity": {
+                    "type": "integer",
+                    "minimum": 0
                 }
             }
         },
@@ -553,23 +789,6 @@
                 "price": {
                     "type": "number",
                     "minimum": 0
-                }
-            }
-        },
-        "dto.User": {
-            "type": "object",
-            "properties": {
-                "created_at": {
-                    "type": "string"
-                },
-                "email": {
-                    "type": "string"
-                },
-                "id": {
-                    "type": "string"
-                },
-                "updated_at": {
-                    "type": "string"
                 }
             }
         },
@@ -619,6 +838,23 @@
                 }
             }
         },
+        "internal_user_dto.User": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "email": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                }
+            }
+        },
         "paging.Pagination": {
             "type": "object",
             "properties": {
@@ -637,6 +873,13 @@
                 "total_page": {
                     "type": "integer"
                 }
+            }
+        },
+        "response.Response": {
+            "type": "object",
+            "properties": {
+                "error": {},
+                "result": {}
             }
         }
     },

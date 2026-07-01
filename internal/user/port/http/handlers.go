@@ -87,7 +87,7 @@ func (h *UserHandler) Register(c *gin.Context) {
 //	@Tags		users
 //	@Security	ApiKeyAuth
 //	@Produce	json
-//	@Success	200	{object}	dto.User
+//	@Success	200	{object}	internal_user_dto.User
 //	@Router		/api/v1/auth/me [get]
 func (h *UserHandler) GetMe(c *gin.Context) {
 	userID := c.GetString("userId")

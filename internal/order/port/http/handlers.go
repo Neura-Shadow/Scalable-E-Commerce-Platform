@@ -87,11 +87,15 @@ type idempotencyRecord struct {
 // PlaceOrder godoc
 //
 //	@Summary	place order
+//	@Description	Creates an order for the authenticated customer. Optional Idempotency-Key is scoped per user and prevents duplicate order creation.
 //	@Tags		orders
 //	@Produce	json
 //	@Security	ApiKeyAuth
+//	@Param		Idempotency-Key	header		string				false	"Optional idempotency key scoped to the authenticated user"
 //	@Param		_	body		dto.PlaceOrderReq	true	"Body"
 //	@Success	200	{object}	dto.Order
+//	@Failure	409	{object}	response.Response	"Duplicate request, in-flight request, or insufficient stock"
+//	@Failure	429	{object}	response.Response	"Too many order placement requests"
 //	@Router		/api/v1/orders [post]
 func (a *OrderHandler) PlaceOrder(c *gin.Context) {
 	startedAt := time.Now()

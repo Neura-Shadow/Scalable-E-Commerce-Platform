@@ -97,10 +97,12 @@ func (p *ProductHandler) ListProducts(c *gin.Context) {
 // CreateProduct godoc
 //
 //	@Summary	create product
+//	@Description	Admin-only product creation.
 //	@Tags		products
 //	@Produce	json
 //	@Security	ApiKeyAuth
 //	@Param		_	body	dto.CreateProductReq	true	"Body"
+//	@Failure	403	{object}	response.Response	"Permission denied"
 //	@Router		/api/v1/products [post]
 func (p *ProductHandler) CreateProduct(c *gin.Context) {
 	var req dto.CreateProductReq
@@ -126,11 +128,13 @@ func (p *ProductHandler) CreateProduct(c *gin.Context) {
 // UpdateProduct godoc
 //
 //	@Summary	update product
+//	@Description	Admin-only product update.
 //	@Tags		products
 //	@Produce	json
 //	@Security	ApiKeyAuth
 //	@Param		id	path	string					true	"Product ID"
 //	@Param		_	body	dto.UpdateProductReq	true	"Body"
+//	@Failure	403	{object}	response.Response	"Permission denied"
 //	@Router		/api/v1/products/{id} [put]
 func (p *ProductHandler) UpdateProduct(c *gin.Context) {
 	productId := c.Param("id")
