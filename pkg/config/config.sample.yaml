@@ -27,3 +27,12 @@ outbox_publish_batch_size: 100
 outbox_publish_max_attempts: 3
 outbox_publish_retry_base_seconds: 60
 outbox_publish_interval_seconds: 30
+
+outbox_consumer_enabled: false
+outbox_consumer_group: order-events
+outbox_consumer_name: local-consumer-1
+outbox_consumer_batch_size: 10
+outbox_consumer_block_seconds: 5
+outbox_consumer_processed_ttl_seconds: 86400
+outbox_consumer_claim_min_idle_seconds: 60
+outbox_consumer_claim_batch_size: 10

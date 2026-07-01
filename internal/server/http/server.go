@@ -24,6 +24,7 @@ import (
 	orderHttp "goshop/internal/order/port/http"
 	orderRepository "goshop/internal/order/repository"
 	orderService "goshop/internal/order/service"
+	outboxConsumer "goshop/internal/outbox/consumer"
 	outboxRepository "goshop/internal/outbox/repository"
 	outboxService "goshop/internal/outbox/service"
 	productHttp "goshop/internal/product/port/http"
@@ -71,6 +72,11 @@ func (s Server) Run() error {
 		return err
 	}
 	defer stopOutboxPublisher()
+	stopOutboxConsumer, err := s.startOutboxConsumer()
+	if err != nil {
+		return err
+	}
+	defer stopOutboxConsumer()
 
 	// Start http server
 	logger.Info("HTTP server is listening on PORT: ", s.cfg.HttpPort)
@@ -183,6 +189,74 @@ func (s Server) startOutboxPublisher() (context.CancelFunc, error) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+			}
+		}
+	}()
+
+	return cancel, nil
+}
+
+func (s Server) newOutboxConsumer() *outboxConsumer.RedisConsumer {
+	return outboxConsumer.NewRedisConsumer(
+		s.cache,
+		outboxConsumer.NewLogEventHandler(),
+		outboxConsumer.NewRedisProcessedEventStore(s.cache, config.OutboxConsumerProcessedTTL()),
+		outboxConsumer.WithStreamName(config.OutboxRedisStreamName()),
+		outboxConsumer.WithGroupName(config.OutboxConsumerGroup()),
+		outboxConsumer.WithConsumerName(config.OutboxConsumerName()),
+		outboxConsumer.WithBatchSize(int64(config.OutboxConsumerBatchSize())),
+		outboxConsumer.WithBlock(config.OutboxConsumerBlock()),
+		outboxConsumer.WithClaimMinIdle(config.OutboxConsumerClaimMinIdle()),
+		outboxConsumer.WithClaimBatchSize(int64(config.OutboxConsumerClaimBatchSize())),
+	)
+}
+
+func (s Server) startOutboxConsumer() (context.CancelFunc, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	if !config.OutboxConsumerEnabled() {
+		return cancel, nil
+	}
+
+	consumer := s.newOutboxConsumer()
+	if err := consumer.EnsureGroup(ctx); err != nil {
+		cancel()
+		return cancel, err
+	}
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			result, err := consumer.RunOnce(ctx)
+			if err != nil {
+				logger.Error("outbox_consumer_batch_failed", err)
+			} else if result.Read > 0 {
+				logger.Info(
+					"outbox_consumer_batch_complete read=", result.Read,
+					" processed=", result.Processed,
+					" skipped=", result.Skipped,
+					" failed=", result.Failed,
+					" invalid=", result.Invalid,
+					" acked=", result.Acked,
+				)
+			}
+
+			claimResult, err := consumer.ClaimStaleOnce(ctx)
+			if err != nil {
+				logger.Error("outbox_consumer_claim_failed", err)
+			} else if claimResult.Read > 0 {
+				logger.Info(
+					"outbox_consumer_claim_complete read=", claimResult.Read,
+					" processed=", claimResult.Processed,
+					" skipped=", claimResult.Skipped,
+					" failed=", claimResult.Failed,
+					" invalid=", claimResult.Invalid,
+					" acked=", claimResult.Acked,
+				)
 			}
 		}
 	}()

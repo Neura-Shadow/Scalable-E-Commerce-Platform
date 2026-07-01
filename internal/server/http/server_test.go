@@ -4,9 +4,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/quangdangfit/gocommon/validation"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	outboxService "goshop/internal/outbox/service"
@@ -111,6 +113,41 @@ func TestServer_StartOutboxPublisherRejectsUnknownPublisherType(t *testing.T) {
 	stop()
 }
 
+func TestServer_StartOutboxConsumerDisabledByDefault(t *testing.T) {
+	withOutboxConsumerConfig(t, false, "stream:orders", "order-events", "local-consumer-1", 10, 5, 86400, 60, 10)
+	mockDB := dbMocks.NewIDatabase(t)
+	mockRedis := redisMocks.NewIRedis(t)
+	server := NewServer(validation.New(), mockDB, mockRedis)
+
+	stop, err := server.startOutboxConsumer()
+
+	require.NoError(t, err)
+	require.NotNil(t, stop)
+	stop()
+}
+
+func TestServer_StartOutboxConsumerEnabledUsesConfigValues(t *testing.T) {
+	withOutboxConsumerConfig(t, true, "stream:test-orders", "test-group", "test-consumer", 3, 1, 120, 7, 2)
+	mockDB := dbMocks.NewIDatabase(t)
+	mockRedis := redisMocks.NewIRedis(t)
+	mockRedis.On("XGroupCreateMkStream", mock.Anything, "stream:test-orders", "test-group", "0").
+		Return(nil).
+		Once()
+	mockRedis.On("XReadGroup", mock.Anything, "test-group", "test-consumer", "stream:test-orders", int64(3), time.Second).
+		Return(nil, nil).
+		Maybe()
+	mockRedis.On("XAutoClaim", mock.Anything, "stream:test-orders", "test-group", "test-consumer", "0-0", 7*time.Second, int64(2)).
+		Return(nil, "0-0", nil).
+		Maybe()
+	server := NewServer(validation.New(), mockDB, mockRedis)
+
+	stop, err := server.startOutboxConsumer()
+
+	require.NoError(t, err)
+	require.NotNil(t, stop)
+	stop()
+}
+
 func withOutboxPublisherConfig(t *testing.T, publisherType string, streamName string) {
 	t.Helper()
 	cfg := config.GetConfig()
@@ -126,5 +163,52 @@ func withOutboxPublisherConfig(t *testing.T, publisherType string, streamName st
 		cfg.OutboxPublisherType = previousPublisherType
 		cfg.OutboxRedisStreamName = previousStreamName
 		cfg.OutboxPublisherEnabled = previousEnabled
+	})
+}
+
+func withOutboxConsumerConfig(
+	t *testing.T,
+	enabled bool,
+	streamName string,
+	groupName string,
+	consumerName string,
+	batchSize int,
+	blockSeconds int,
+	processedTTLSeconds int,
+	claimMinIdleSeconds int,
+	claimBatchSize int,
+) {
+	t.Helper()
+	cfg := config.GetConfig()
+	previousPublisherStreamName := cfg.OutboxRedisStreamName
+	previousEnabled := cfg.OutboxConsumerEnabled
+	previousGroupName := cfg.OutboxConsumerGroup
+	previousConsumerName := cfg.OutboxConsumerName
+	previousBatchSize := cfg.OutboxConsumerBatchSize
+	previousBlockSeconds := cfg.OutboxConsumerBlockSeconds
+	previousProcessedTTLSeconds := cfg.OutboxConsumerProcessedTTLSeconds
+	previousClaimMinIdleSeconds := cfg.OutboxConsumerClaimMinIdleSeconds
+	previousClaimBatchSize := cfg.OutboxConsumerClaimBatchSize
+
+	cfg.OutboxRedisStreamName = streamName
+	cfg.OutboxConsumerEnabled = enabled
+	cfg.OutboxConsumerGroup = groupName
+	cfg.OutboxConsumerName = consumerName
+	cfg.OutboxConsumerBatchSize = batchSize
+	cfg.OutboxConsumerBlockSeconds = blockSeconds
+	cfg.OutboxConsumerProcessedTTLSeconds = processedTTLSeconds
+	cfg.OutboxConsumerClaimMinIdleSeconds = claimMinIdleSeconds
+	cfg.OutboxConsumerClaimBatchSize = claimBatchSize
+
+	t.Cleanup(func() {
+		cfg.OutboxRedisStreamName = previousPublisherStreamName
+		cfg.OutboxConsumerEnabled = previousEnabled
+		cfg.OutboxConsumerGroup = previousGroupName
+		cfg.OutboxConsumerName = previousConsumerName
+		cfg.OutboxConsumerBatchSize = previousBatchSize
+		cfg.OutboxConsumerBlockSeconds = previousBlockSeconds
+		cfg.OutboxConsumerProcessedTTLSeconds = previousProcessedTTLSeconds
+		cfg.OutboxConsumerClaimMinIdleSeconds = previousClaimMinIdleSeconds
+		cfg.OutboxConsumerClaimBatchSize = previousClaimBatchSize
 	})
 }

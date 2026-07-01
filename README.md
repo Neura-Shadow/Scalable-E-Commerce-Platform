@@ -10,7 +10,7 @@ The codebase is organized by feature under `internal/`:
 - `internal/product`: product catalog APIs with Redis caching.
 - `internal/inventory`: stock read/write APIs and atomic stock mutation.
 - `internal/order`: order placement, ownership checks, cancellation, and order queries.
-- `internal/outbox`: durable database-backed event records with log and Redis Streams publisher options.
+- `internal/outbox`: durable database-backed event records with Redis Streams publisher and consumer foundations.
 - `internal/server`: HTTP and gRPC composition roots.
 
 The order module follows a clean dependency direction:
@@ -35,6 +35,7 @@ HTTP handler -> order service -> repository/inventory/product ports -> GORM/Redi
 - Redis-backed order-placement rate limiting.
 - Transactional outbox foundation for `order.created` events.
 - Optional log or Redis Streams outbox publisher worker with retry and dead-letter bookkeeping.
+- Optional Redis Streams consumer group foundation with idempotent event processing.
 - HTTP server hardening with explicit timeouts, max header size, body size limits, trusted proxy lockdown, and graceful shutdown.
 - Swagger API documentation.
 - Docker Compose for PostgreSQL and Redis.
@@ -103,7 +104,20 @@ outbox_publisher_type: redis_stream
 outbox_redis_stream_name: stream:orders
 ```
 
-The Redis Streams publisher writes `event_id`, `aggregate_type`, `aggregate_id`, `event_type`, `payload`, and `created_at` with `XADD`. A downstream consumer service is not implemented yet; see `docs/order-outbox-pattern.md` for the planned consumer group design.
+The Redis Streams publisher writes `event_id`, `aggregate_type`, `aggregate_id`, `event_type`, `payload`, and `created_at` with `XADD`. Real downstream business side-effect handlers are not implemented yet; see `docs/order-outbox-pattern.md` for the consumer group foundation and future handler design.
+
+The Redis Streams consumer foundation is also disabled by default. It can create/read from consumer group `order-events`, skip duplicate `event_id` values with Redis processed-event keys, acknowledge successful messages with `XACK`, and claim stale pending messages with `XAUTOCLAIM`. The included handler only logs metadata and performs no payment, email, fulfillment, or analytics side effects yet.
+
+```yaml
+outbox_consumer_enabled: true
+outbox_consumer_group: order-events
+outbox_consumer_name: local-consumer-1
+outbox_consumer_batch_size: 10
+outbox_consumer_block_seconds: 5
+outbox_consumer_processed_ttl_seconds: 86400
+outbox_consumer_claim_min_idle_seconds: 60
+outbox_consumer_claim_batch_size: 10
+```
 
 ## Permission Model
 
@@ -227,7 +241,7 @@ curl -X PUT http://localhost:8888/api/v1/inventory/<product_id> \
 - `docs/order-production-readiness.md`: idempotency, rate limiting, HTTP hardening, and observability.
 - `docs/load-testing.md`: load, concurrency, and optional outbox publisher testing guidance.
 - `docs/production-deployment.md`: production deployment checklist and operational notes.
-- `docs/order-outbox-pattern.md`: transactional outbox foundation, Redis Streams publishing, and future consumer design.
+- `docs/order-outbox-pattern.md`: transactional outbox foundation, Redis Streams publishing, and consumer group foundation.
 - `docs/migrations/outbox_events.sql`: production-style outbox table and index migration reference.
 
 ## Production-Readiness Notes
@@ -239,4 +253,4 @@ curl -X PUT http://localhost:8888/api/v1/inventory/<product_id> \
 - Tune order rate limits to match real checkout traffic.
 - Add persistent migrations before using this project for a long-lived production database.
 - Move the auto-migrated `outbox_events` table to explicit migrations before long-lived production use.
-- Use the Redis Streams outbox publisher when order events must leave the database, and add a consumer service before treating downstream processing as complete.
+- Use the Redis Streams outbox publisher and consumer foundation when order events must leave the database, and add real business side-effect handlers before treating downstream processing as complete.

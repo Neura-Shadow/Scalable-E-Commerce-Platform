@@ -16,23 +16,30 @@ const (
 	DatabaseTimeout    = 5 * time.Second
 	ProductCachingTime = 1 * time.Minute
 
-	DefaultHTTPReadTimeoutSeconds        = 10
-	DefaultHTTPWriteTimeoutSeconds       = 30
-	DefaultHTTPIdleTimeoutSeconds        = 60
-	DefaultHTTPReadHeaderTimeoutSeconds  = 5
-	DefaultHTTPMaxHeaderBytes            = 1 << 20
-	DefaultMaxRequestBodyBytes           = 1 << 20
-	DefaultOrderIdempotencyTTLSeconds    = 24 * 60 * 60
-	DefaultOrderRateLimitLimit           = 120
-	DefaultOrderRateLimitWindowSeconds   = 60
-	DefaultOutboxPublishBatchSize        = 100
-	DefaultOutboxPublishMaxAttempts      = 3
-	DefaultOutboxPublishRetryBaseSeconds = 60
-	DefaultOutboxPublishIntervalSeconds  = 30
-	OutboxPublisherTypeLog               = "log"
-	OutboxPublisherTypeRedisStream       = "redis_stream"
-	DefaultOutboxPublisherType           = OutboxPublisherTypeLog
-	DefaultOutboxRedisStreamName         = "stream:orders"
+	DefaultHTTPReadTimeoutSeconds            = 10
+	DefaultHTTPWriteTimeoutSeconds           = 30
+	DefaultHTTPIdleTimeoutSeconds            = 60
+	DefaultHTTPReadHeaderTimeoutSeconds      = 5
+	DefaultHTTPMaxHeaderBytes                = 1 << 20
+	DefaultMaxRequestBodyBytes               = 1 << 20
+	DefaultOrderIdempotencyTTLSeconds        = 24 * 60 * 60
+	DefaultOrderRateLimitLimit               = 120
+	DefaultOrderRateLimitWindowSeconds       = 60
+	DefaultOutboxPublishBatchSize            = 100
+	DefaultOutboxPublishMaxAttempts          = 3
+	DefaultOutboxPublishRetryBaseSeconds     = 60
+	DefaultOutboxPublishIntervalSeconds      = 30
+	OutboxPublisherTypeLog                   = "log"
+	OutboxPublisherTypeRedisStream           = "redis_stream"
+	DefaultOutboxPublisherType               = OutboxPublisherTypeLog
+	DefaultOutboxRedisStreamName             = "stream:orders"
+	DefaultOutboxConsumerGroup               = "order-events"
+	DefaultOutboxConsumerName                = "local-consumer-1"
+	DefaultOutboxConsumerBatchSize           = 10
+	DefaultOutboxConsumerBlockSeconds        = 5
+	DefaultOutboxConsumerProcessedTTLSeconds = 24 * 60 * 60
+	DefaultOutboxConsumerClaimMinIdleSeconds = 60
+	DefaultOutboxConsumerClaimBatchSize      = 10
 )
 
 var AuthIgnoreMethods = []string{
@@ -68,6 +75,15 @@ type Schema struct {
 	OutboxPublishMaxAttempts      int    `env:"outbox_publish_max_attempts"`
 	OutboxPublishRetryBaseSeconds int    `env:"outbox_publish_retry_base_seconds"`
 	OutboxPublishIntervalSeconds  int    `env:"outbox_publish_interval_seconds"`
+
+	OutboxConsumerEnabled             bool   `env:"outbox_consumer_enabled"`
+	OutboxConsumerGroup               string `env:"outbox_consumer_group"`
+	OutboxConsumerName                string `env:"outbox_consumer_name"`
+	OutboxConsumerBatchSize           int    `env:"outbox_consumer_batch_size"`
+	OutboxConsumerBlockSeconds        int    `env:"outbox_consumer_block_seconds"`
+	OutboxConsumerProcessedTTLSeconds int    `env:"outbox_consumer_processed_ttl_seconds"`
+	OutboxConsumerClaimMinIdleSeconds int    `env:"outbox_consumer_claim_min_idle_seconds"`
+	OutboxConsumerClaimBatchSize      int    `env:"outbox_consumer_claim_batch_size"`
 }
 
 var (
@@ -177,6 +193,50 @@ func OutboxPublishRetryBase() time.Duration {
 
 func OutboxPublishInterval() time.Duration {
 	return secondsOrDefault(cfg.OutboxPublishIntervalSeconds, DefaultOutboxPublishIntervalSeconds)
+}
+
+func OutboxConsumerEnabled() bool {
+	return cfg.OutboxConsumerEnabled
+}
+
+func OutboxConsumerGroup() string {
+	if cfg.OutboxConsumerGroup == "" {
+		return DefaultOutboxConsumerGroup
+	}
+	return cfg.OutboxConsumerGroup
+}
+
+func OutboxConsumerName() string {
+	if cfg.OutboxConsumerName == "" {
+		return DefaultOutboxConsumerName
+	}
+	return cfg.OutboxConsumerName
+}
+
+func OutboxConsumerBatchSize() int {
+	if cfg.OutboxConsumerBatchSize <= 0 {
+		return DefaultOutboxConsumerBatchSize
+	}
+	return cfg.OutboxConsumerBatchSize
+}
+
+func OutboxConsumerBlock() time.Duration {
+	return secondsOrDefault(cfg.OutboxConsumerBlockSeconds, DefaultOutboxConsumerBlockSeconds)
+}
+
+func OutboxConsumerProcessedTTL() time.Duration {
+	return secondsOrDefault(cfg.OutboxConsumerProcessedTTLSeconds, DefaultOutboxConsumerProcessedTTLSeconds)
+}
+
+func OutboxConsumerClaimMinIdle() time.Duration {
+	return secondsOrDefault(cfg.OutboxConsumerClaimMinIdleSeconds, DefaultOutboxConsumerClaimMinIdleSeconds)
+}
+
+func OutboxConsumerClaimBatchSize() int {
+	if cfg.OutboxConsumerClaimBatchSize <= 0 {
+		return DefaultOutboxConsumerClaimBatchSize
+	}
+	return cfg.OutboxConsumerClaimBatchSize
 }
 
 func secondsOrDefault(value, defaultValue int) time.Duration {

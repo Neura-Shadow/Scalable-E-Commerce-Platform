@@ -5,6 +5,8 @@ package mocks
 import (
 	context "context"
 
+	redis "goshop/pkg/redis"
+
 	mock "github.com/stretchr/testify/mock"
 
 	time "time"
@@ -27,6 +29,30 @@ func (_m *IRedis) Get(key string, value interface{}) error {
 	}
 
 	return r0
+}
+
+// Exists provides a mock function with given fields: ctx, key
+func (_m *IRedis) Exists(ctx context.Context, key string) (bool, error) {
+	ret := _m.Called(ctx, key)
+
+	var r0 bool
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, string) (bool, error)); ok {
+		return rf(ctx, key)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, string) bool); ok {
+		r0 = rf(ctx, key)
+	} else {
+		r0 = ret.Get(0).(bool)
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = rf(ctx, key)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
 }
 
 // IsConnected provides a mock function with given fields:
@@ -86,6 +112,100 @@ func (_m *IRedis) XAdd(ctx context.Context, stream string, values map[string]int
 	}
 
 	return r0, r1
+}
+
+// XGroupCreateMkStream provides a mock function with given fields: ctx, stream, group, start
+func (_m *IRedis) XGroupCreateMkStream(ctx context.Context, stream string, group string, start string) error {
+	ret := _m.Called(ctx, stream, group, start)
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(context.Context, string, string, string) error); ok {
+		r0 = rf(ctx, stream, group, start)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
+// XReadGroup provides a mock function with given fields: ctx, group, consumer, stream, count, block
+func (_m *IRedis) XReadGroup(ctx context.Context, group string, consumer string, stream string, count int64, block time.Duration) ([]redis.RedisStreamMessage, error) {
+	ret := _m.Called(ctx, group, consumer, stream, count, block)
+
+	var r0 []redis.RedisStreamMessage
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, string, string, string, int64, time.Duration) ([]redis.RedisStreamMessage, error)); ok {
+		return rf(ctx, group, consumer, stream, count, block)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, string, string, string, int64, time.Duration) []redis.RedisStreamMessage); ok {
+		r0 = rf(ctx, group, consumer, stream, count, block)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]redis.RedisStreamMessage)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, string, string, string, int64, time.Duration) error); ok {
+		r1 = rf(ctx, group, consumer, stream, count, block)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// XAck provides a mock function with given fields: ctx, stream, group, ids
+func (_m *IRedis) XAck(ctx context.Context, stream string, group string, ids ...string) error {
+	_va := make([]interface{}, len(ids))
+	for _i := range ids {
+		_va[_i] = ids[_i]
+	}
+	var _ca []interface{}
+	_ca = append(_ca, ctx, stream, group)
+	_ca = append(_ca, _va...)
+	ret := _m.Called(_ca...)
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(context.Context, string, string, ...string) error); ok {
+		r0 = rf(ctx, stream, group, ids...)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
+// XAutoClaim provides a mock function with given fields: ctx, stream, group, consumer, start, minIdle, count
+func (_m *IRedis) XAutoClaim(ctx context.Context, stream string, group string, consumer string, start string, minIdle time.Duration, count int64) ([]redis.RedisStreamMessage, string, error) {
+	ret := _m.Called(ctx, stream, group, consumer, start, minIdle, count)
+
+	var r0 []redis.RedisStreamMessage
+	var r1 string
+	var r2 error
+	if rf, ok := ret.Get(0).(func(context.Context, string, string, string, string, time.Duration, int64) ([]redis.RedisStreamMessage, string, error)); ok {
+		return rf(ctx, stream, group, consumer, start, minIdle, count)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, string, string, string, string, time.Duration, int64) []redis.RedisStreamMessage); ok {
+		r0 = rf(ctx, stream, group, consumer, start, minIdle, count)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]redis.RedisStreamMessage)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, string, string, string, string, time.Duration, int64) string); ok {
+		r1 = rf(ctx, stream, group, consumer, start, minIdle, count)
+	} else {
+		r1 = ret.Get(1).(string)
+	}
+
+	if rf, ok := ret.Get(2).(func(context.Context, string, string, string, string, time.Duration, int64) error); ok {
+		r2 = rf(ctx, stream, group, consumer, start, minIdle, count)
+	} else {
+		r2 = ret.Error(2)
+	}
+
+	return r0, r1, r2
 }
 
 // Keys provides a mock function with given fields: pattern

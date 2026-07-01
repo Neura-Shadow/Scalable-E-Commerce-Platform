@@ -20,13 +20,17 @@ Implemented now:
 - `internal/outbox/service.EventPublisher`
 - `internal/outbox/service.PublisherWorker`
 - Redis Streams `EventPublisher` adapter backed by `pkg/redis.IRedis.XAdd`
+- `internal/outbox/consumer.RedisConsumer`
+- Redis Streams consumer group reads with `XREADGROUP`, success acknowledgements with `XACK`, and stale pending recovery with `XAUTOCLAIM`
+- Redis-backed processed-event keys for consumed-event idempotency
 - `order.created` event creation inside the existing order Unit of Work transaction
 - retry bookkeeping with `attempts`, `next_attempt_at`, and `dead_letter`
 - locked pending-event batch fetching with `FOR UPDATE SKIP LOCKED`
 
 Not implemented yet:
 
-- downstream Redis Streams consumer service
+- real downstream payment, email, fulfillment, or analytics handlers
+- poison-message dead-letter stream movement
 - always-on publisher startup by default
 
 ## Candidate future order events
@@ -114,6 +118,14 @@ outbox_publish_batch_size = 100
 outbox_publish_max_attempts = 3
 outbox_publish_retry_base_seconds = 60
 outbox_publish_interval_seconds = 30
+outbox_consumer_enabled = false
+outbox_consumer_group = order-events
+outbox_consumer_name = local-consumer-1
+outbox_consumer_batch_size = 10
+outbox_consumer_block_seconds = 5
+outbox_consumer_processed_ttl_seconds = 86400
+outbox_consumer_claim_min_idle_seconds = 60
+outbox_consumer_claim_batch_size = 10
 ```
 
 Supported publisher types are `log` and `redis_stream`. The current default publisher is `log`, which records event metadata such as event type and aggregate ID, and does not log full payloads.
@@ -139,6 +151,19 @@ created_at
 
 The payload is included as JSON in the stream entry, but payload contents are not logged by the publisher.
 
+Enable the Redis Streams consumer foundation locally with:
+
+```yaml
+outbox_consumer_enabled: true
+outbox_consumer_group: order-events
+outbox_consumer_name: local-consumer-1
+outbox_consumer_batch_size: 10
+outbox_consumer_block_seconds: 5
+outbox_consumer_processed_ttl_seconds: 86400
+outbox_consumer_claim_min_idle_seconds: 60
+outbox_consumer_claim_batch_size: 10
+```
+
 The worker:
 
 1. select pending outbox rows whose `next_attempt_at <= now()`
@@ -149,21 +174,43 @@ The worker:
 
 Locked fetches use `FOR UPDATE SKIP LOCKED` so multiple enabled workers can avoid claiming the same pending rows while a batch transaction is active.
 
+## Redis Streams consumer foundation
+
+The current consumer foundation:
+
+- ensures consumer group `order-events` exists with `XGROUP CREATE ... MKSTREAM`
+- reads new stream messages with `XREADGROUP GROUP`
+- parses `event_id`, `aggregate_type`, `aggregate_id`, `event_type`, `payload`, and `created_at`
+- checks `processed:events:{eventID}` before handling
+- dispatches to an `EventHandler`
+- marks the event processed after successful handling
+- acknowledges successful or already-processed messages with `XACK`
+- leaves failed or invalid messages unacknowledged
+- claims stale pending messages with `XAUTOCLAIM`
+- logs metadata only and does not log payload contents
+
+The built-in handler is intentionally a metadata-only log/no-op handler. It provides a safe framework for future side-effect handlers without sending emails, starting fulfillment, authorizing payments, or writing analytics yet.
+
 ## Idempotent consumers
 
-Consumers should store processed `event_id` values or use natural idempotency keys. This protects downstream services from duplicate delivery caused by publisher retries.
+Consumers must not rely only on `XACK` for idempotency because messages can be redelivered. The current Redis processed-event store uses:
 
-The planned Redis Streams consumer design is:
+```text
+processed:events:{eventID}
+```
 
-- stream: `stream:orders`
-- group name: `order-events`
-- consumer names: one stable name per worker process or pod
-- idempotency: persist or cache processed `event_id` before applying side effects
-- pending entries: use `XPENDING` and claim stale entries with `XAUTOCLAIM`
-- retry and ack: acknowledge with `XACK` only after idempotent side effects commit
-- dead-letter stream: move poison messages to `stream:orders:dead_letter` after bounded delivery attempts
+The foundation checks the key before handling and sets it after the current handler succeeds. This ordering prevents acknowledging an event before handler success. If a future handler performs non-idempotent business side effects, it should either make those side effects idempotent by `event_id` or move the processed-event marker into the same durable commit boundary as the side effect.
 
-No consumer service is implemented in this repository yet. The current Redis Streams adapter only publishes outbox rows into the configured stream.
+## Pending recovery and dead-letter strategy
+
+The current pending recovery path uses `XAUTOCLAIM` for messages older than `outbox_consumer_claim_min_idle_seconds`, processes them through the same handler, and acknowledges only on success.
+
+Future poison-message handling should use:
+
+- pending inspection with `XPENDING`
+- bounded delivery attempts stored outside the stream or in message metadata
+- dead-letter stream: `stream:orders:dead_letter`
+- no `XACK` until the original message is either successfully handled or durably copied to the dead-letter stream
 
 ## Retry strategy
 
