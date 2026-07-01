@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 
+	inventoryModel "goshop/internal/inventory/model"
 	"goshop/internal/order/dto"
 	"goshop/internal/order/model"
 	productModel "goshop/internal/product/model"
@@ -240,6 +243,64 @@ func TestOrderAPI_PlaceOrderUnauthorized(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, writer.Code)
 }
 
+func TestOrderAPI_ConcurrentOrdersNeverOversell(t *testing.T) {
+	defer cleanData()
+
+	u := userModel.User{
+		Email:    "limited-stock-customer@test.com",
+		Password: "test123456",
+		Role:     userModel.UserRoleCustomer,
+	}
+	dbTest.Create(context.Background(), &u)
+	defer cleanData(&u)
+
+	p := productModel.Product{
+		Name:        "limited-stock-product",
+		Description: "limited-stock-product",
+		Price:       1,
+	}
+	dbTest.Create(context.Background(), &p)
+	dbTest.GetDB().
+		Model(&inventoryModel.Inventory{}).
+		Where("product_id = ?", p.ID).
+		Update("quantity", int64(3))
+
+	req := &dto.PlaceOrderReq{
+		Lines: []dto.PlaceOrderLineReq{
+			{
+				ProductID: p.ID,
+				Quantity:  1,
+			},
+		},
+	}
+	token := tokenForUser(&u)
+
+	var wg sync.WaitGroup
+	var successCount int64
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			writer := makeRequest("POST", "/api/v1/orders", req, token)
+			if writer.Code == http.StatusOK {
+				atomic.AddInt64(&successCount, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	var inventory inventoryModel.Inventory
+	err := dbTest.GetDB().Where("product_id = ?", p.ID).First(&inventory).Error
+	assert.NoError(t, err)
+	assert.Equal(t, int64(3), successCount)
+	assert.Equal(t, int64(0), inventory.Quantity)
+	assert.GreaterOrEqual(t, inventory.Quantity, int64(0))
+
+	var orderCount int64
+	dbTest.GetDB().Model(&model.Order{}).Where("user_id = ?", u.ID).Count(&orderCount)
+	assert.Equal(t, int64(3), orderCount)
+}
+
 // Get Order Detail
 // =================================================================================================
 
@@ -300,6 +361,47 @@ func TestOrderAPI_GetOrderByIDNotFound(t *testing.T) {
 	_ = json.Unmarshal(writer.Body.Bytes(), &response)
 	assert.Equal(t, http.StatusNotFound, writer.Code)
 	assert.Equal(t, "Not found", response["error"]["message"])
+}
+
+func TestOrderAPI_GetOrderByIDNotMine(t *testing.T) {
+	u := userModel.User{
+		Email:    "order-owner@test.com",
+		Password: "test123456",
+	}
+	dbTest.Create(context.Background(), &u)
+	defer cleanData(&u)
+
+	otherUser := userModel.User{
+		Email:    "order-viewer@test.com",
+		Password: "test123456",
+		Role:     userModel.UserRoleCustomer,
+	}
+	dbTest.Create(context.Background(), &otherUser)
+	defer cleanData(&otherUser)
+
+	p := productModel.Product{
+		Name:        "test-product-not-mine",
+		Description: "test-product-not-mine",
+		Price:       1,
+	}
+	dbTest.Create(context.Background(), &p)
+
+	o := model.Order{
+		UserID: u.ID,
+		Lines: []*model.OrderLine{
+			{
+				ProductID: p.ID,
+				Quantity:  1,
+			},
+		},
+	}
+	dbTest.Create(context.Background(), &o)
+
+	writer := makeRequest("GET", fmt.Sprintf("/api/v1/orders/%s", o.ID), nil, tokenForUser(&otherUser))
+	var response map[string]map[string]string
+	_ = json.Unmarshal(writer.Body.Bytes(), &response)
+	assert.Equal(t, http.StatusForbidden, writer.Code)
+	assert.Equal(t, "Permission denied", response["error"]["message"])
 }
 
 // Cancel Order

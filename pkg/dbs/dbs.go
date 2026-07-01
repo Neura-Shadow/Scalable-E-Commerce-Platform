@@ -16,6 +16,7 @@ type IDatabase interface {
 	GetDB() *gorm.DB
 	AutoMigrate(models ...any) error
 	WithTransaction(function func(tx IDatabase) error) error
+	WithTransactionContext(ctx context.Context, function func(tx IDatabase) error) error
 	Create(ctx context.Context, doc any) error
 	CreateInBatches(ctx context.Context, docs any, batchSize int) error
 	Update(ctx context.Context, doc any) error
@@ -68,7 +69,11 @@ func (d *Database) AutoMigrate(models ...any) error {
 }
 
 func (d *Database) WithTransaction(function func(tx IDatabase) error) error {
-	return d.db.Transaction(func(tx *gorm.DB) error {
+	return d.WithTransactionContext(context.Background(), function)
+}
+
+func (d *Database) WithTransactionContext(ctx context.Context, function func(tx IDatabase) error) error {
+	return d.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		return function(&Database{db: tx})
 	})
 }
@@ -82,28 +87,28 @@ func (d *Database) Create(ctx context.Context, doc any) error {
 	ctx, cancel := context.WithTimeout(ctx, DatabaseTimeout)
 	defer cancel()
 
-	return d.db.Create(doc).Error
+	return d.db.WithContext(ctx).Create(doc).Error
 }
 
 func (d *Database) CreateInBatches(ctx context.Context, docs any, batchSize int) error {
 	ctx, cancel := context.WithTimeout(ctx, DatabaseTimeout)
 	defer cancel()
 
-	return d.db.CreateInBatches(docs, batchSize).Error
+	return d.db.WithContext(ctx).CreateInBatches(docs, batchSize).Error
 }
 
 func (d *Database) Update(ctx context.Context, doc any) error {
 	ctx, cancel := context.WithTimeout(ctx, DatabaseTimeout)
 	defer cancel()
 
-	return d.db.Save(doc).Error
+	return d.db.WithContext(ctx).Save(doc).Error
 }
 
 func (d *Database) Delete(ctx context.Context, value any, opts ...FindOption) error {
 	ctx, cancel := context.WithTimeout(ctx, DatabaseTimeout)
 	defer cancel()
 
-	query := d.applyOptions(opts...)
+	query := d.applyOptions(opts...).WithContext(ctx)
 	return query.Delete(value).Error
 }
 
@@ -111,7 +116,7 @@ func (d *Database) FindById(ctx context.Context, id string, result any) error {
 	ctx, cancel := context.WithTimeout(ctx, DatabaseTimeout)
 	defer cancel()
 
-	if err := d.db.Where("id = ? ", id).First(result).Error; err != nil {
+	if err := d.db.WithContext(ctx).Where("id = ? ", id).First(result).Error; err != nil {
 		return err
 	}
 
@@ -122,7 +127,7 @@ func (d *Database) FindOne(ctx context.Context, result any, opts ...FindOption) 
 	ctx, cancel := context.WithTimeout(ctx, DatabaseTimeout)
 	defer cancel()
 
-	query := d.applyOptions(opts...)
+	query := d.applyOptions(opts...).WithContext(ctx)
 	if err := query.First(result).Error; err != nil {
 		return err
 	}
@@ -134,7 +139,7 @@ func (d *Database) Find(ctx context.Context, result any, opts ...FindOption) err
 	ctx, cancel := context.WithTimeout(ctx, DatabaseTimeout)
 	defer cancel()
 
-	query := d.applyOptions(opts...)
+	query := d.applyOptions(opts...).WithContext(ctx)
 	if err := query.Find(result).Error; err != nil {
 		return err
 	}
@@ -146,7 +151,7 @@ func (d *Database) Count(ctx context.Context, model any, total *int64, opts ...F
 	ctx, cancel := context.WithTimeout(ctx, DatabaseTimeout)
 	defer cancel()
 
-	query := d.applyOptions(opts...)
+	query := d.applyOptions(opts...).WithContext(ctx)
 	if err := query.Model(model).Count(total).Error; err != nil {
 		return err
 	}
@@ -171,7 +176,7 @@ func (d *Database) applyOptions(opts ...FindOption) *gorm.DB {
 
 	if opt.query != nil {
 		for _, q := range opt.query {
-			query = query.Where(q.Query, q.Args)
+			query = query.Where(q.Query, q.Args...)
 		}
 	}
 

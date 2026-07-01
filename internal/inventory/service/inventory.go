@@ -93,35 +93,31 @@ func (s *InventoryService) AdjustStock(ctx context.Context, productID string, re
 }
 
 func (s *InventoryService) ConsumeStock(ctx context.Context, productID string, quantity int64) error {
-	if quantity < 0 {
+	if quantity <= 0 {
 		return errors.New("quantity must be positive")
 	}
 
-	inventory, err := s.getInventory(ctx, productID)
+	consumed, err := s.repo.ConsumeStock(ctx, productID, quantity)
 	if err != nil {
 		return err
 	}
-
-	if inventory.Quantity < quantity {
-		return ErrInsufficientStock
+	if consumed {
+		return nil
 	}
 
-	inventory.Quantity -= quantity
-	return s.repo.Update(ctx, inventory)
+	if _, err := s.getInventory(ctx, productID); err != nil {
+		return err
+	}
+
+	return ErrInsufficientStock
 }
 
 func (s *InventoryService) Restock(ctx context.Context, productID string, quantity int64) error {
-	if quantity < 0 {
+	if quantity <= 0 {
 		return errors.New("quantity must be positive")
 	}
 
-	inventory, _, err := s.getOrCreate(ctx, productID)
-	if err != nil {
-		return err
-	}
-
-	inventory.Quantity += quantity
-	return s.repo.Update(ctx, inventory)
+	return s.repo.Restock(ctx, productID, quantity)
 }
 
 func (s *InventoryService) getInventory(ctx context.Context, productID string) (*model.Inventory, error) {

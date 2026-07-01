@@ -12,7 +12,7 @@ func Error(c *gin.Context, status int, err error, message string) {
 		"message": message,
 	}
 
-	if cfg.Environment != config.ProductionEnv {
+	if cfg.Environment != config.ProductionEnv && status < 500 {
 		errorRes["debug"] = err.Error()
 	}
 

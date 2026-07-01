@@ -22,6 +22,7 @@ import (
 	userModel "goshop/internal/user/model"
 	"goshop/pkg/config"
 	"goshop/pkg/dbs"
+	"goshop/pkg/jtoken"
 	"goshop/pkg/redis"
 	"goshop/pkg/utils"
 )
@@ -129,6 +130,14 @@ func refreshToken() string {
 	var response map[string]map[string]string
 	_ = json.Unmarshal(writer.Body.Bytes(), &response)
 	return response["result"]["refresh_token"]
+}
+
+func tokenForUser(user *userModel.User) string {
+	return jtoken.GenerateAccessToken(map[string]interface{}{
+		"id":    user.ID,
+		"email": user.Email,
+		"role":  user.Role,
+	})
 }
 
 func parseResponseResult(resData []byte, result interface{}) {

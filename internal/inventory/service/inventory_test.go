@@ -53,10 +53,7 @@ func TestInventoryServiceConsumeStockSuccess(t *testing.T) {
 	repo := &repoMocks.IInventoryRepository{}
 	svc := NewInventoryService(validator, repo)
 
-	repo.On("GetByProductID", mock.Anything, "product").Return(&model.Inventory{ProductID: "product", Quantity: 5}, nil).Once()
-	repo.On("Update", mock.Anything, mock.MatchedBy(func(item *model.Inventory) bool {
-		return item.ProductID == "product" && item.Quantity == 2
-	})).Return(nil).Once()
+	repo.On("ConsumeStock", mock.Anything, "product", int64(3)).Return(true, nil).Once()
 
 	err := svc.ConsumeStock(context.Background(), "product", 3)
 	require.NoError(t, err)
@@ -68,6 +65,7 @@ func TestInventoryServiceConsumeStockInsufficient(t *testing.T) {
 	repo := &repoMocks.IInventoryRepository{}
 	svc := NewInventoryService(validator, repo)
 
+	repo.On("ConsumeStock", mock.Anything, "product", int64(3)).Return(false, nil).Once()
 	repo.On("GetByProductID", mock.Anything, "product").Return(&model.Inventory{ProductID: "product", Quantity: 1}, nil).Once()
 
 	err := svc.ConsumeStock(context.Background(), "product", 3)
@@ -81,15 +79,23 @@ func TestInventoryServiceRestockCreatesRecord(t *testing.T) {
 	repo := &repoMocks.IInventoryRepository{}
 	svc := NewInventoryService(validator, repo)
 
-	repo.On("GetByProductID", mock.Anything, "product").Return(nil, gorm.ErrRecordNotFound).Once()
-	repo.On("Create", mock.Anything, mock.MatchedBy(func(item *model.Inventory) bool {
-		return item.ProductID == "product"
-	})).Return(nil).Once()
-	repo.On("Update", mock.Anything, mock.MatchedBy(func(item *model.Inventory) bool {
-		return item.ProductID == "product" && item.Quantity == 4
-	})).Return(nil).Once()
+	repo.On("Restock", mock.Anything, "product", int64(4)).Return(nil).Once()
 
 	err := svc.Restock(context.Background(), "product", 4)
 	require.NoError(t, err)
+	repo.AssertExpectations(t)
+}
+
+func TestInventoryServiceConsumeStockNotFound(t *testing.T) {
+	validator := validation.New()
+	repo := &repoMocks.IInventoryRepository{}
+	svc := NewInventoryService(validator, repo)
+
+	repo.On("ConsumeStock", mock.Anything, "product", int64(3)).Return(false, nil).Once()
+	repo.On("GetByProductID", mock.Anything, "product").Return(nil, gorm.ErrRecordNotFound).Once()
+
+	err := svc.ConsumeStock(context.Background(), "product", 3)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrInventoryNotFound))
 	repo.AssertExpectations(t)
 }

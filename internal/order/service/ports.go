@@ -19,6 +19,16 @@ type IOrderService interface {
 	CancelOrder(ctx context.Context, orderID, userID string) (*model.Order, error)
 }
 
+type Transactor interface {
+	WithinTransaction(ctx context.Context, fn func(UnitOfWork) error) error
+}
+
+type UnitOfWork interface {
+	Orders() OrderRepository
+	Products() ProductRepository
+	Inventory() InventoryService
+}
+
 type OrderRepository interface {
 	CreateOrder(ctx context.Context, userID string, lines []*model.OrderLine) (*model.Order, error)
 	GetOrderByID(ctx context.Context, id string, preload bool) (*model.Order, error)

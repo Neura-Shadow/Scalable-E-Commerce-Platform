@@ -28,12 +28,7 @@ func (r *OrderRepo) CreateOrder(ctx context.Context, userID string, lines []*mod
 	order.TotalPrice = totalPrice
 	order.UserID = userID
 
-	handler := func(tx dbs.IDatabase) error {
-		return r.createOrder(ctx, tx, order, lines)
-	}
-
-	err := r.db.WithTransaction(handler)
-	if err != nil {
+	if err := r.createOrder(ctx, r.db, order, lines); err != nil {
 		return nil, err
 	}
 

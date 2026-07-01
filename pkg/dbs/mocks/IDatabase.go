@@ -202,6 +202,20 @@ func (_m *IDatabase) WithTransaction(function func(dbs.IDatabase) error) error {
 	return r0
 }
 
+// WithTransactionContext provides a mock function with given fields: ctx, function
+func (_m *IDatabase) WithTransactionContext(ctx context.Context, function func(dbs.IDatabase) error) error {
+	ret := _m.Called(ctx, function)
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(context.Context, func(dbs.IDatabase) error) error); ok {
+		r0 = rf(ctx, function)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
 // NewIDatabase creates a new instance of IDatabase. It also registers a testing interface on the mock and a cleanup function to assert the mocks expectations.
 // The first argument is typically a *testing.T value.
 func NewIDatabase(t interface {

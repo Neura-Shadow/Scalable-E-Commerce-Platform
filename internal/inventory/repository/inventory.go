@@ -3,6 +3,9 @@ package repository
 import (
 	"context"
 
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+
 	"goshop/internal/inventory/dto"
 	"goshop/internal/inventory/model"
 	"goshop/pkg/config"
@@ -16,6 +19,8 @@ type IInventoryRepository interface {
 	GetByProductID(ctx context.Context, productID string) (*model.Inventory, error)
 	Create(ctx context.Context, inventory *model.Inventory) error
 	Update(ctx context.Context, inventory *model.Inventory) error
+	ConsumeStock(ctx context.Context, productID string, quantity int64) (bool, error)
+	Restock(ctx context.Context, productID string, quantity int64) error
 }
 
 type InventoryRepo struct {
@@ -79,4 +84,32 @@ func (r *InventoryRepo) Create(ctx context.Context, inventory *model.Inventory) 
 
 func (r *InventoryRepo) Update(ctx context.Context, inventory *model.Inventory) error {
 	return r.db.Update(ctx, inventory)
+}
+
+func (r *InventoryRepo) ConsumeStock(ctx context.Context, productID string, quantity int64) (bool, error) {
+	result := r.db.GetDB().
+		WithContext(ctx).
+		Model(&model.Inventory{}).
+		Where("product_id = ? AND quantity >= ?", productID, quantity).
+		UpdateColumn("quantity", gorm.Expr("quantity - ?", quantity))
+	if result.Error != nil {
+		return false, result.Error
+	}
+
+	return result.RowsAffected > 0, nil
+}
+
+func (r *InventoryRepo) Restock(ctx context.Context, productID string, quantity int64) error {
+	return r.db.GetDB().
+		WithContext(ctx).
+		Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "product_id"}},
+			DoUpdates: clause.Assignments(map[string]interface{}{
+				"quantity": gorm.Expr("inventories.quantity + ?", quantity),
+			}),
+		}).
+		Create(&model.Inventory{
+			ProductID: productID,
+			Quantity:  quantity,
+		}).Error
 }

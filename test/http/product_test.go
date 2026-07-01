@@ -11,6 +11,7 @@ import (
 
 	"goshop/internal/product/dto"
 	"goshop/internal/product/model"
+	userModel "goshop/internal/user/model"
 )
 
 // Get Product Detail
@@ -327,6 +328,27 @@ func TestProductAPI_CreateProductSuccess(t *testing.T) {
 	assert.Equal(t, "test-product", res.Name)
 	assert.Equal(t, "test-product", res.Description)
 	assert.Equal(t, float64(1), res.Price)
+}
+
+func TestProductAPI_CreateProductForbiddenForCustomer(t *testing.T) {
+	u := userModel.User{
+		Email:    "customer-product@test.com",
+		Password: "test123456",
+		Role:     userModel.UserRoleCustomer,
+	}
+	dbTest.Create(context.Background(), &u)
+	defer cleanData(&u)
+
+	p := &dto.CreateProductReq{
+		Name:        "test-product",
+		Description: "test-product",
+		Price:       1,
+	}
+	writer := makeRequest("POST", "/api/v1/products", p, tokenForUser(&u))
+	var response map[string]map[string]string
+	_ = json.Unmarshal(writer.Body.Bytes(), &response)
+	assert.Equal(t, http.StatusForbidden, writer.Code)
+	assert.Equal(t, "Permission denied", response["error"]["message"])
 }
 
 func TestProductAPI_CreateProductInvalidFieldType(t *testing.T) {

@@ -86,6 +86,7 @@ func (s Server) newOrderService() orderService.IOrderService {
 	productRepo := orderRepository.NewProductRepository(s.db)
 	inventoryRepo := inventoryRepository.NewInventoryRepository(s.db)
 	inventorySvc := inventoryService.NewInventoryService(s.validator, inventoryRepo)
+	orderUOW := orderRepository.NewUnitOfWork(s.db, s.validator)
 
-	return orderService.NewOrderService(s.validator, orderRepo, productRepo, inventorySvc)
+	return orderService.NewOrderService(s.validator, orderRepo, productRepo, inventorySvc, orderUOW)
 }

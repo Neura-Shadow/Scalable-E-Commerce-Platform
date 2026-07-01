@@ -92,3 +92,36 @@ func (_m *IInventoryRepository) Update(ctx context.Context, inventory *model.Inv
 
 	return r0
 }
+
+func (_m *IInventoryRepository) ConsumeStock(ctx context.Context, productID string, quantity int64) (bool, error) {
+	ret := _m.Called(ctx, productID, quantity)
+
+	var r0 bool
+	if rf, ok := ret.Get(0).(func(context.Context, string, int64) bool); ok {
+		r0 = rf(ctx, productID, quantity)
+	} else {
+		r0 = ret.Bool(0)
+	}
+
+	var r1 error
+	if rf, ok := ret.Get(1).(func(context.Context, string, int64) error); ok {
+		r1 = rf(ctx, productID, quantity)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+func (_m *IInventoryRepository) Restock(ctx context.Context, productID string, quantity int64) error {
+	ret := _m.Called(ctx, productID, quantity)
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(context.Context, string, int64) error); ok {
+		r0 = rf(ctx, productID, quantity)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}

@@ -26,6 +26,18 @@ type OrderServiceTestSuite struct {
 	service         IOrderService
 }
 
+type recordingTransactor struct {
+	uow    UnitOfWork
+	called bool
+	err    error
+}
+
+func (t *recordingTransactor) WithinTransaction(ctx context.Context, fn func(UnitOfWork) error) error {
+	t.called = true
+	t.err = fn(t.uow)
+	return t.err
+}
+
 func (suite *OrderServiceTestSuite) SetupTest() {
 	logger.Initialize(config.ProductionEnv)
 
@@ -236,8 +248,6 @@ func (suite *OrderServiceTestSuite) TestPlaceOrderCreateFail() {
 		}, nil).Times(1)
 	suite.mockInventory.On("ConsumeStock", mock.Anything, "productID", int64(2)).
 		Return(nil).Times(1)
-	suite.mockInventory.On("Restock", mock.Anything, "productID", int64(2)).
-		Return(nil).Times(1)
 
 	suite.mockRepo.On("CreateOrder", mock.Anything, "userID", mock.Anything).
 		Return(nil, errors.New("error")).Times(1)
@@ -245,6 +255,44 @@ func (suite *OrderServiceTestSuite) TestPlaceOrderCreateFail() {
 	order, err := suite.service.PlaceOrder(context.Background(), req)
 	suite.Nil(order)
 	suite.NotNil(err)
+}
+
+func (suite *OrderServiceTestSuite) TestPlaceOrderCreateFailReturnsTransactionError() {
+	req := &dto.PlaceOrderReq{
+		UserID: "userID",
+		Lines: []dto.PlaceOrderLineReq{
+			{
+				ProductID: "productID",
+				Quantity:  2,
+			},
+		},
+	}
+	expectedErr := errors.New("create order failed")
+	transactor := &recordingTransactor{
+		uow: staticUnitOfWork{
+			orders:    suite.mockRepo,
+			products:  suite.mockProductRepo,
+			inventory: suite.mockInventory,
+		},
+	}
+	svc := NewOrderService(validation.New(), suite.mockRepo, suite.mockProductRepo, suite.mockInventory, transactor)
+
+	suite.mockProductRepo.On("GetProductByID", mock.Anything, "productID").
+		Return(&model.Product{
+			Name:        "product",
+			Description: "product description",
+			Price:       1.1,
+		}, nil).Times(1)
+	suite.mockInventory.On("ConsumeStock", mock.Anything, "productID", int64(2)).
+		Return(nil).Times(1)
+	suite.mockRepo.On("CreateOrder", mock.Anything, "userID", mock.Anything).
+		Return(nil, expectedErr).Times(1)
+
+	order, err := svc.PlaceOrder(context.Background(), req)
+	suite.Nil(order)
+	suite.ErrorIs(err, expectedErr)
+	suite.True(transactor.called)
+	suite.ErrorIs(transactor.err, expectedErr)
 }
 
 func (suite *OrderServiceTestSuite) TestPlaceOrderInsufficientInventory() {
@@ -325,8 +373,6 @@ func (suite *OrderServiceTestSuite) TestCancelOrderFail() {
 	suite.mockRepo.On("GetOrderByID", mock.Anything, orderID, true).
 		Return(existingOrder, nil).Times(1)
 	suite.mockInventory.On("Restock", mock.Anything, "productID", int64(2)).
-		Return(nil).Times(1)
-	suite.mockInventory.On("ConsumeStock", mock.Anything, "productID", int64(2)).
 		Return(nil).Times(1)
 	suite.mockRepo.On("UpdateOrder", mock.Anything, existingOrder).
 		Return(errors.New("error")).Times(1)
