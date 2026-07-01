@@ -243,6 +243,135 @@ func TestOrderAPI_PlaceOrderUnauthorized(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, writer.Code)
 }
 
+func TestOrderAPI_IdempotentPlaceOrderDuplicateReturnsSameOrder(t *testing.T) {
+	defer cleanData()
+
+	u := userModel.User{
+		Email:    "idempotent-customer@test.com",
+		Password: "test123456",
+		Role:     userModel.UserRoleCustomer,
+	}
+	dbTest.Create(context.Background(), &u)
+	defer cleanData(&u)
+
+	p := productModel.Product{
+		Name:        "idempotent-product",
+		Description: "idempotent-product",
+		Price:       1,
+	}
+	dbTest.Create(context.Background(), &p)
+
+	req := &dto.PlaceOrderReq{
+		Lines: []dto.PlaceOrderLineReq{
+			{
+				ProductID: p.ID,
+				Quantity:  1,
+			},
+		},
+	}
+	headers := map[string]string{"Idempotency-Key": "checkout-duplicate"}
+	token := tokenForUser(&u)
+
+	first := makeRequestWithHeaders("POST", "/api/v1/orders", req, token, headers)
+	second := makeRequestWithHeaders("POST", "/api/v1/orders", req, token, headers)
+
+	var firstOrder dto.Order
+	var secondOrder dto.Order
+	parseResponseResult(first.Body.Bytes(), &firstOrder)
+	parseResponseResult(second.Body.Bytes(), &secondOrder)
+	assert.Equal(t, http.StatusOK, first.Code)
+	assert.Equal(t, http.StatusOK, second.Code)
+	assert.Equal(t, firstOrder.ID, secondOrder.ID)
+
+	var orderCount int64
+	dbTest.GetDB().Model(&model.Order{}).Where("user_id = ?", u.ID).Count(&orderCount)
+	assert.Equal(t, int64(1), orderCount)
+}
+
+func TestOrderAPI_IdempotencyKeyScopedByUser(t *testing.T) {
+	defer cleanData()
+
+	u1 := userModel.User{
+		Email:    "idempotent-user-1@test.com",
+		Password: "test123456",
+		Role:     userModel.UserRoleCustomer,
+	}
+	u2 := userModel.User{
+		Email:    "idempotent-user-2@test.com",
+		Password: "test123456",
+		Role:     userModel.UserRoleCustomer,
+	}
+	dbTest.Create(context.Background(), &u1)
+	dbTest.Create(context.Background(), &u2)
+	defer cleanData(&u1, &u2)
+
+	p := productModel.Product{
+		Name:        "idempotent-scoped-product",
+		Description: "idempotent-scoped-product",
+		Price:       1,
+	}
+	dbTest.Create(context.Background(), &p)
+
+	req := &dto.PlaceOrderReq{
+		Lines: []dto.PlaceOrderLineReq{
+			{
+				ProductID: p.ID,
+				Quantity:  1,
+			},
+		},
+	}
+	headers := map[string]string{"Idempotency-Key": "same-client-key"}
+
+	first := makeRequestWithHeaders("POST", "/api/v1/orders", req, tokenForUser(&u1), headers)
+	second := makeRequestWithHeaders("POST", "/api/v1/orders", req, tokenForUser(&u2), headers)
+
+	assert.Equal(t, http.StatusOK, first.Code)
+	assert.Equal(t, http.StatusOK, second.Code)
+
+	var orderCount int64
+	dbTest.GetDB().Model(&model.Order{}).Where("user_id IN ?", []string{u1.ID, u2.ID}).Count(&orderCount)
+	assert.Equal(t, int64(2), orderCount)
+}
+
+func TestOrderAPI_MissingIdempotencyKeyAllowsSeparateOrders(t *testing.T) {
+	defer cleanData()
+
+	u := userModel.User{
+		Email:    "no-idempotency-customer@test.com",
+		Password: "test123456",
+		Role:     userModel.UserRoleCustomer,
+	}
+	dbTest.Create(context.Background(), &u)
+	defer cleanData(&u)
+
+	p := productModel.Product{
+		Name:        "no-idempotency-product",
+		Description: "no-idempotency-product",
+		Price:       1,
+	}
+	dbTest.Create(context.Background(), &p)
+
+	req := &dto.PlaceOrderReq{
+		Lines: []dto.PlaceOrderLineReq{
+			{
+				ProductID: p.ID,
+				Quantity:  1,
+			},
+		},
+	}
+	token := tokenForUser(&u)
+
+	first := makeRequest("POST", "/api/v1/orders", req, token)
+	second := makeRequest("POST", "/api/v1/orders", req, token)
+
+	assert.Equal(t, http.StatusOK, first.Code)
+	assert.Equal(t, http.StatusOK, second.Code)
+
+	var orderCount int64
+	dbTest.GetDB().Model(&model.Order{}).Where("user_id = ?", u.ID).Count(&orderCount)
+	assert.Equal(t, int64(2), orderCount)
+}
+
 func TestOrderAPI_ConcurrentOrdersNeverOversell(t *testing.T) {
 	defer cleanData()
 

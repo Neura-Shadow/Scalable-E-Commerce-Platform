@@ -15,6 +15,16 @@ const (
 
 	DatabaseTimeout    = 5 * time.Second
 	ProductCachingTime = 1 * time.Minute
+
+	DefaultHTTPReadTimeoutSeconds       = 10
+	DefaultHTTPWriteTimeoutSeconds      = 30
+	DefaultHTTPIdleTimeoutSeconds       = 60
+	DefaultHTTPReadHeaderTimeoutSeconds = 5
+	DefaultHTTPMaxHeaderBytes           = 1 << 20
+	DefaultMaxRequestBodyBytes          = 1 << 20
+	DefaultOrderIdempotencyTTLSeconds   = 24 * 60 * 60
+	DefaultOrderRateLimitLimit          = 120
+	DefaultOrderRateLimitWindowSeconds  = 60
 )
 
 var AuthIgnoreMethods = []string{
@@ -31,6 +41,17 @@ type Schema struct {
 	RedisURI      string `env:"redis_uri"`
 	RedisPassword string `env:"redis_password"`
 	RedisDB       int    `env:"redis_db"`
+
+	HTTPReadTimeoutSeconds       int   `env:"http_read_timeout_seconds"`
+	HTTPWriteTimeoutSeconds      int   `env:"http_write_timeout_seconds"`
+	HTTPIdleTimeoutSeconds       int   `env:"http_idle_timeout_seconds"`
+	HTTPReadHeaderTimeoutSeconds int   `env:"http_read_header_timeout_seconds"`
+	HTTPMaxHeaderBytes           int   `env:"http_max_header_bytes"`
+	MaxRequestBodyBytes          int64 `env:"max_request_body_bytes"`
+
+	OrderIdempotencyTTLSeconds  int   `env:"order_idempotency_ttl_seconds"`
+	OrderRateLimitLimit         int64 `env:"order_rate_limit_limit"`
+	OrderRateLimitWindowSeconds int   `env:"order_rate_limit_window_seconds"`
 }
 
 var (
@@ -55,4 +76,56 @@ func LoadConfig() *Schema {
 
 func GetConfig() *Schema {
 	return &cfg
+}
+
+func HTTPReadTimeout() time.Duration {
+	return secondsOrDefault(cfg.HTTPReadTimeoutSeconds, DefaultHTTPReadTimeoutSeconds)
+}
+
+func HTTPWriteTimeout() time.Duration {
+	return secondsOrDefault(cfg.HTTPWriteTimeoutSeconds, DefaultHTTPWriteTimeoutSeconds)
+}
+
+func HTTPIdleTimeout() time.Duration {
+	return secondsOrDefault(cfg.HTTPIdleTimeoutSeconds, DefaultHTTPIdleTimeoutSeconds)
+}
+
+func HTTPReadHeaderTimeout() time.Duration {
+	return secondsOrDefault(cfg.HTTPReadHeaderTimeoutSeconds, DefaultHTTPReadHeaderTimeoutSeconds)
+}
+
+func HTTPMaxHeaderBytes() int {
+	if cfg.HTTPMaxHeaderBytes <= 0 {
+		return DefaultHTTPMaxHeaderBytes
+	}
+	return cfg.HTTPMaxHeaderBytes
+}
+
+func MaxRequestBodyBytes() int64 {
+	if cfg.MaxRequestBodyBytes <= 0 {
+		return DefaultMaxRequestBodyBytes
+	}
+	return cfg.MaxRequestBodyBytes
+}
+
+func OrderIdempotencyTTL() time.Duration {
+	return secondsOrDefault(cfg.OrderIdempotencyTTLSeconds, DefaultOrderIdempotencyTTLSeconds)
+}
+
+func OrderRateLimitLimit() int64 {
+	if cfg.OrderRateLimitLimit <= 0 {
+		return DefaultOrderRateLimitLimit
+	}
+	return cfg.OrderRateLimitLimit
+}
+
+func OrderRateLimitWindow() time.Duration {
+	return secondsOrDefault(cfg.OrderRateLimitWindowSeconds, DefaultOrderRateLimitWindowSeconds)
+}
+
+func secondsOrDefault(value, defaultValue int) time.Duration {
+	if value <= 0 {
+		value = defaultValue
+	}
+	return time.Duration(value) * time.Second
 }

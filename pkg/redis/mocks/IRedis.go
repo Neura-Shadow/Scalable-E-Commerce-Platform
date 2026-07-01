@@ -41,6 +41,27 @@ func (_m *IRedis) IsConnected() bool {
 	return r0
 }
 
+// IncrementWithExpiration provides a mock function with given fields: key, expiration
+func (_m *IRedis) IncrementWithExpiration(key string, expiration time.Duration) (int64, error) {
+	ret := _m.Called(key, expiration)
+
+	var r0 int64
+	if rf, ok := ret.Get(0).(func(string, time.Duration) int64); ok {
+		r0 = rf(key, expiration)
+	} else {
+		r0 = ret.Get(0).(int64)
+	}
+
+	var r1 error
+	if rf, ok := ret.Get(1).(func(string, time.Duration) error); ok {
+		r1 = rf(key, expiration)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
 // Keys provides a mock function with given fields: pattern
 func (_m *IRedis) Keys(pattern string) ([]string, error) {
 	ret := _m.Called(pattern)
@@ -127,6 +148,27 @@ func (_m *IRedis) SetWithExpiration(key string, value interface{}, expiration ti
 	}
 
 	return r0
+}
+
+// SetNXWithExpiration provides a mock function with given fields: key, value, expiration
+func (_m *IRedis) SetNXWithExpiration(key string, value interface{}, expiration time.Duration) (bool, error) {
+	ret := _m.Called(key, value, expiration)
+
+	var r0 bool
+	if rf, ok := ret.Get(0).(func(string, interface{}, time.Duration) bool); ok {
+		r0 = rf(key, value, expiration)
+	} else {
+		r0 = ret.Get(0).(bool)
+	}
+
+	var r1 error
+	if rf, ok := ret.Get(1).(func(string, interface{}, time.Duration) error); ok {
+		r1 = rf(key, value, expiration)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
 }
 
 // NewIRedis creates a new instance of IRedis. It also registers a testing interface on the mock and a cleanup function to assert the mocks expectations.

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/quangdangfit/gocommon/logger"
@@ -20,6 +21,7 @@ import (
 	productMocks "goshop/internal/product/service/mocks"
 	"goshop/pkg/config"
 	"goshop/pkg/paging"
+	redisMocks "goshop/pkg/redis/mocks"
 	"goshop/pkg/response"
 	"goshop/pkg/utils"
 )
@@ -106,6 +108,131 @@ func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderSuccess() {
 	suite.Equal(float64(8), orderRes.TotalPrice)
 	suite.Equal(string(model.OrderStatusNew), orderRes.Status)
 	suite.Equal(2, len(orderRes.Lines))
+}
+
+func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderFirstIdempotentRequestSuccess() {
+	req := &dto.PlaceOrderReq{
+		Lines: []dto.PlaceOrderLineReq{
+			{
+				ProductID: "productId1",
+				Quantity:  2,
+			},
+		},
+	}
+	cache := redisMocks.NewIRedis(suite.T())
+	handler := NewOrderHandler(
+		suite.mockService,
+		WithOrderCache(cache),
+		WithOrderRateLimit(0, time.Minute),
+		WithOrderIdempotencyTTL(time.Hour),
+	)
+	ctx, writer := suite.prepareContext(req)
+	ctx.Set("userId", "123456")
+	ctx.Request.Header.Set("Idempotency-Key", "checkout-123")
+	req.UserID = "123456"
+	cacheKey := orderIdempotencyRedisKey("123456", "checkout-123")
+
+	cache.On("SetNXWithExpiration", cacheKey, mock.MatchedBy(func(record idempotencyRecord) bool {
+		return record.Status == idempotencyStatusProcessing && record.OrderID == ""
+	}), time.Hour).Return(true, nil).Times(1)
+	suite.mockService.On("PlaceOrder", mock.Anything, req).
+		Return(&model.Order{
+			ID:         "orderId1",
+			Code:       "orderCode1",
+			UserID:     "123456",
+			TotalPrice: 2,
+			Status:     model.OrderStatusNew,
+			Lines: []*model.OrderLine{
+				{
+					ProductID: "productId1",
+					Quantity:  2,
+				},
+			},
+		}, nil).Times(1)
+	cache.On("SetWithExpiration", cacheKey, mock.MatchedBy(func(record idempotencyRecord) bool {
+		return record.Status == idempotencyStatusSucceeded && record.OrderID == "orderId1"
+	}), time.Hour).Return(nil).Times(1)
+
+	handler.PlaceOrder(ctx)
+
+	suite.Equal(http.StatusOK, writer.Code)
+}
+
+func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderDuplicateIdempotencyReturnsStoredOrder() {
+	req := &dto.PlaceOrderReq{
+		Lines: []dto.PlaceOrderLineReq{
+			{
+				ProductID: "productId1",
+				Quantity:  2,
+			},
+		},
+	}
+	cache := redisMocks.NewIRedis(suite.T())
+	handler := NewOrderHandler(
+		suite.mockService,
+		WithOrderCache(cache),
+		WithOrderRateLimit(0, time.Minute),
+		WithOrderIdempotencyTTL(time.Hour),
+	)
+	ctx, writer := suite.prepareContext(req)
+	ctx.Set("userId", "123456")
+	ctx.Request.Header.Set("Idempotency-Key", "checkout-123")
+	cacheKey := orderIdempotencyRedisKey("123456", "checkout-123")
+
+	cache.On("SetNXWithExpiration", cacheKey, mock.Anything, time.Hour).Return(false, nil).Times(1)
+	cache.On("Get", cacheKey, mock.AnythingOfType("*http.idempotencyRecord")).
+		Run(func(args mock.Arguments) {
+			record := args.Get(1).(*idempotencyRecord)
+			record.Status = idempotencyStatusSucceeded
+			record.OrderID = "orderId1"
+		}).
+		Return(nil).Times(1)
+	suite.mockService.On("GetOrderByID", mock.Anything, "orderId1", "123456").
+		Return(&model.Order{
+			ID:         "orderId1",
+			Code:       "orderCode1",
+			UserID:     "123456",
+			TotalPrice: 2,
+			Status:     model.OrderStatusNew,
+		}, nil).Times(1)
+
+	handler.PlaceOrder(ctx)
+
+	var res response.Response
+	var orderRes dto.Order
+	_ = json.Unmarshal(writer.Body.Bytes(), &res)
+	utils.Copy(&orderRes, &res.Result)
+	suite.Equal(http.StatusOK, writer.Code)
+	suite.Equal("orderId1", orderRes.ID)
+}
+
+func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderRateLimited() {
+	req := &dto.PlaceOrderReq{
+		Lines: []dto.PlaceOrderLineReq{
+			{
+				ProductID: "productId1",
+				Quantity:  2,
+			},
+		},
+	}
+	cache := redisMocks.NewIRedis(suite.T())
+	handler := NewOrderHandler(
+		suite.mockService,
+		WithOrderCache(cache),
+		WithOrderRateLimit(1, time.Minute),
+	)
+	ctx, writer := suite.prepareContext(req)
+	ctx.Set("userId", "123456")
+
+	cache.On("IncrementWithExpiration", orderRateLimitRedisKey("123456"), time.Minute).
+		Return(int64(2), nil).Times(1)
+
+	handler.PlaceOrder(ctx)
+
+	var res map[string]map[string]string
+	_ = json.Unmarshal(writer.Body.Bytes(), &res)
+	suite.Equal(http.StatusTooManyRequests, writer.Code)
+	suite.Equal("Too many requests", res["error"]["message"])
 }
 
 func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderInvalidProductIdType() {

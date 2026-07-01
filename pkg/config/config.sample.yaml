@@ -8,3 +8,14 @@ database_uri: postgres://username:password@host:5432/database
 redis_uri: localhost:6379
 redis_password:
 redis_db: 0
+
+http_read_timeout_seconds: 10
+http_write_timeout_seconds: 30
+http_idle_timeout_seconds: 60
+http_read_header_timeout_seconds: 5
+http_max_header_bytes: 1048576
+max_request_body_bytes: 1048576
+
+order_idempotency_ttl_seconds: 86400
+order_rate_limit_limit: 120
+order_rate_limit_window_seconds: 60

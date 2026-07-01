@@ -1,9 +1,15 @@
 package http
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/quangdangfit/gocommon/logger"
@@ -22,6 +28,7 @@ import (
 	userHttp "goshop/internal/user/port/http"
 	"goshop/pkg/config"
 	"goshop/pkg/dbs"
+	"goshop/pkg/middleware"
 	"goshop/pkg/redis"
 	"goshop/pkg/response"
 )
@@ -35,8 +42,12 @@ type Server struct {
 }
 
 func NewServer(validator validation.Validation, db dbs.IDatabase, cache redis.IRedis) *Server {
+	engine := gin.Default()
+	_ = engine.SetTrustedProxies(nil)
+	engine.Use(middleware.MaxBodyBytes(config.MaxRequestBodyBytes()))
+
 	return &Server{
-		engine:    gin.Default(),
+		engine:    engine,
 		cfg:       config.GetConfig(),
 		validator: validator,
 		db:        db,
@@ -45,7 +56,6 @@ func NewServer(validator validation.Validation, db dbs.IDatabase, cache redis.IR
 }
 
 func (s Server) Run() error {
-	_ = s.engine.SetTrustedProxies(nil)
 	if s.cfg.Environment == config.ProductionEnv {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -54,15 +64,24 @@ func (s Server) Run() error {
 		log.Fatalf("MapRoutes Error: %v", err)
 	}
 	s.engine.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
-	s.engine.GET("/health", func(c *gin.Context) {
-		response.JSON(c, http.StatusOK, nil)
-		return
-	})
 
 	// Start http server
 	logger.Info("HTTP server is listening on PORT: ", s.cfg.HttpPort)
-	if err := s.engine.Run(fmt.Sprintf(":%d", s.cfg.HttpPort)); err != nil {
-		log.Fatalf("Running HTTP server: %v", err)
+	httpServer := s.newHTTPServer()
+	go func() {
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("Running HTTP server: %v", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := httpServer.Shutdown(ctx); err != nil {
+		return err
 	}
 
 	return nil
@@ -73,12 +92,27 @@ func (s Server) GetEngine() *gin.Engine {
 }
 
 func (s Server) MapRoutes() error {
+	s.engine.GET("/health", func(c *gin.Context) {
+		response.JSON(c, http.StatusOK, nil)
+	})
 	v1 := s.engine.Group("/api/v1")
 	userHttp.Routes(v1, s.db, s.validator)
 	productHttp.Routes(v1, s.db, s.validator, s.cache)
-	orderHttp.Routes(v1, s.newOrderService())
+	orderHttp.Routes(v1, s.newOrderService(), s.cache)
 	inventoryHttp.Routes(v1, s.db, s.validator)
 	return nil
+}
+
+func (s Server) newHTTPServer() *http.Server {
+	return &http.Server{
+		Addr:              fmt.Sprintf(":%d", s.cfg.HttpPort),
+		Handler:           s.engine,
+		ReadTimeout:       config.HTTPReadTimeout(),
+		WriteTimeout:      config.HTTPWriteTimeout(),
+		IdleTimeout:       config.HTTPIdleTimeout(),
+		ReadHeaderTimeout: config.HTTPReadHeaderTimeout(),
+		MaxHeaderBytes:    config.HTTPMaxHeaderBytes(),
+	}
 }
 
 func (s Server) newOrderService() orderService.IOrderService {

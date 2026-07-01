@@ -98,10 +98,17 @@ func registerProductInventoryFixture() {
 }
 
 func makeRequest(method, url string, body interface{}, token string) *httptest.ResponseRecorder {
+	return makeRequestWithHeaders(method, url, body, token, nil)
+}
+
+func makeRequestWithHeaders(method, url string, body interface{}, token string, headers map[string]string) *httptest.ResponseRecorder {
 	requestBody, _ := json.Marshal(body)
 	request, _ := http.NewRequest(method, url, bytes.NewBuffer(requestBody))
 	if token != "" {
 		request.Header.Add("Authorization", "Bearer "+token)
+	}
+	for key, value := range headers {
+		request.Header.Add(key, value)
 	}
 	writer := httptest.NewRecorder()
 	testRouter.ServeHTTP(writer, request)
