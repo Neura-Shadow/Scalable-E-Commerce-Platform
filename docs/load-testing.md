@@ -35,6 +35,13 @@ outbox_consumer_failure_ttl_seconds: 86400
 outbox_dead_letter_stream_name: stream:orders:dead_letter
 ```
 
+Metrics are available by default during load runs:
+
+```yaml
+metrics_enabled: true
+metrics_path: /metrics
+```
+
 Create or seed:
 
 - one customer account
@@ -121,6 +128,12 @@ At minimum, record:
 - p99 latency
 - final stock quantity
 - order count for the tested user
+- p95/p99 order latency from `order_place_duration_seconds`
+- HTTP p95/p99 latency from `http_request_duration_seconds`
+- idempotency duplicate count
+- rate-limited request count
+- outbox publish success/failure counts
+- consumer failure and dead-letter counts
 
 The final stock quantity must never be negative.
 
@@ -137,6 +150,7 @@ redis-cli XINFO GROUPS stream:orders
 redis-cli XPENDING stream:orders order-events
 redis-cli XLEN stream:orders:dead_letter
 redis-cli XRANGE stream:orders:dead_letter - +
+curl -s http://localhost:8888/metrics
 ```
 
 Track:
@@ -150,5 +164,21 @@ Track:
 - stale messages claimed with `XAUTOCLAIM`
 - duplicate event IDs skipped
 - dead-letter stream growth rate
+- `outbox_publish_failure_total`
+- `outbox_consumer_failure_total`
+- `outbox_consumer_dead_letter_total`
 
 This repository does not yet include real downstream business side effects. Future consumer group load tests should keep group `order-events`, process messages idempotently by `event_id`, acknowledge after side effects commit, and alert on unexpected growth in `stream:orders:dead_letter`.
+
+Dashboard panels worth watching during load tests:
+
+- order placement rate
+- order error rate
+- p95/p99 order latency
+- idempotency duplicate count
+- rate-limited requests
+- outbox publish success/failure
+- consumer pending/dead-letter behavior
+- DLQ growth
+
+Keep metrics labels bounded to `method`, `path`, `status`, `event_type`, `result`, and `reason`. Do not add user IDs, order IDs, event IDs, idempotency keys, or raw Redis keys.

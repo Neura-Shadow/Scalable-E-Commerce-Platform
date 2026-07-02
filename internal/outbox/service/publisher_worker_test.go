@@ -14,6 +14,7 @@ import (
 	"github.com/quangdangfit/gocommon/logger"
 	"goshop/internal/outbox/model"
 	"goshop/pkg/config"
+	appMetrics "goshop/pkg/metrics"
 	redisMocks "goshop/pkg/redis/mocks"
 )
 
@@ -71,11 +72,12 @@ func TestPublisherWorkerRunOnceMarksSuccessfulEventsPublished(t *testing.T) {
 }
 
 func TestPublisherWorkerRunOnceRecordsPublishFailureAndContinues(t *testing.T) {
+	appMetrics.ResetForTest()
 	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
 	retryDelay := 5 * time.Minute
 	publishErr := errors.New("publish failed")
-	failing := &model.OutboxEvent{ID: "evt-fail", Status: model.OutboxEventStatusPending, Attempts: 0, NextAttemptAt: now}
-	success := &model.OutboxEvent{ID: "evt-ok", Status: model.OutboxEventStatusPending, Attempts: 0, NextAttemptAt: now}
+	failing := &model.OutboxEvent{ID: "evt-fail", EventType: "order.created", Status: model.OutboxEventStatusPending, Attempts: 0, NextAttemptAt: now}
+	success := &model.OutboxEvent{ID: "evt-ok", EventType: "order.created", Status: model.OutboxEventStatusPending, Attempts: 0, NextAttemptAt: now}
 	repo := newFakeOutboxRepository(failing, success)
 	publisher := &recordingEventPublisher{failures: map[string]error{"evt-fail": publishErr}}
 	worker := NewPublisherWorker(
@@ -97,12 +99,21 @@ func TestPublisherWorkerRunOnceRecordsPublishFailureAndContinues(t *testing.T) {
 	assert.Equal(t, model.OutboxEventStatusPending, repo.events[failing.ID].Status)
 	assert.Equal(t, now.Add(retryDelay), repo.events[failing.ID].NextAttemptAt)
 	assert.Equal(t, model.OutboxEventStatusPublished, repo.events[success.ID].Status)
+	snapshot, err := appMetrics.SnapshotText()
+	require.NoError(t, err)
+	assert.Contains(t, snapshot, "outbox_publish_attempt_total")
+	assert.Contains(t, snapshot, "outbox_publish_success_total")
+	assert.Contains(t, snapshot, "outbox_publish_failure_total")
+	assert.Contains(t, snapshot, `event_type="order.created"`)
+	assert.NotContains(t, snapshot, "evt-fail")
+	assert.NotContains(t, snapshot, "evt-ok")
 }
 
 func TestPublisherWorkerRunOnceMovesExhaustedFailureToDeadLetter(t *testing.T) {
+	appMetrics.ResetForTest()
 	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
 	publishErr := errors.New("publish failed")
-	event := &model.OutboxEvent{ID: "evt-1", Status: model.OutboxEventStatusPending, Attempts: 2, NextAttemptAt: now}
+	event := &model.OutboxEvent{ID: "evt-1", EventType: "order.created", Status: model.OutboxEventStatusPending, Attempts: 2, NextAttemptAt: now}
 	repo := newFakeOutboxRepository(event)
 	publisher := &recordingEventPublisher{failures: map[string]error{"evt-1": publishErr}}
 	worker := NewPublisherWorker(
@@ -118,6 +129,11 @@ func TestPublisherWorkerRunOnceMovesExhaustedFailureToDeadLetter(t *testing.T) {
 	assert.Equal(t, 1, result.Failed)
 	assert.Equal(t, 3, repo.events[event.ID].Attempts)
 	assert.Equal(t, model.OutboxEventStatusDeadLetter, repo.events[event.ID].Status)
+	snapshot, err := appMetrics.SnapshotText()
+	require.NoError(t, err)
+	assert.Contains(t, snapshot, "outbox_dead_letter_total")
+	assert.Contains(t, snapshot, `reason="publish_exhausted"`)
+	assert.NotContains(t, snapshot, "evt-1")
 }
 
 func TestPublisherWorkerRunOnceMarksEventPublishedAfterRedisStreamPublishSucceeds(t *testing.T) {

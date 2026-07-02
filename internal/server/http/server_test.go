@@ -14,6 +14,7 @@ import (
 	outboxService "goshop/internal/outbox/service"
 	"goshop/pkg/config"
 	dbMocks "goshop/pkg/dbs/mocks"
+	appMetrics "goshop/pkg/metrics"
 	redisMocks "goshop/pkg/redis/mocks"
 )
 
@@ -59,6 +60,42 @@ func TestServer_HealthRoute(t *testing.T) {
 	writer := httptest.NewRecorder()
 	server.GetEngine().ServeHTTP(writer, req)
 	assert.Equal(t, http.StatusOK, writer.Code)
+}
+
+func TestServer_MetricsRouteEnabledByDefault(t *testing.T) {
+	withMetricsConfig(t, nil, "")
+	appMetrics.ResetForTest()
+	mockDB := dbMocks.NewIDatabase(t)
+	mockRedis := redisMocks.NewIRedis(t)
+
+	server := NewServer(validation.New(), mockDB, mockRedis)
+	err := server.MapRoutes()
+	require.NoError(t, err)
+
+	server.GetEngine().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/health", nil))
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	writer := httptest.NewRecorder()
+	server.GetEngine().ServeHTTP(writer, req)
+
+	assert.Equal(t, http.StatusOK, writer.Code)
+	assert.Contains(t, writer.Body.String(), "http_requests_total")
+}
+
+func TestServer_MetricsRouteCanBeDisabled(t *testing.T) {
+	disabled := false
+	withMetricsConfig(t, &disabled, "/metrics")
+	mockDB := dbMocks.NewIDatabase(t)
+	mockRedis := redisMocks.NewIRedis(t)
+
+	server := NewServer(validation.New(), mockDB, mockRedis)
+	err := server.MapRoutes()
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	writer := httptest.NewRecorder()
+	server.GetEngine().ServeHTTP(writer, req)
+
+	assert.Equal(t, http.StatusNotFound, writer.Code)
 }
 
 func TestServer_HTTPServerHardeningDefaults(t *testing.T) {
@@ -219,5 +256,20 @@ func withOutboxConsumerConfig(
 		cfg.OutboxConsumerMaxDeliveryAttempts = previousMaxDeliveryAttempts
 		cfg.OutboxConsumerFailureTTLSeconds = previousFailureTTLSeconds
 		cfg.OutboxDeadLetterStreamName = previousDeadLetterStreamName
+	})
+}
+
+func withMetricsConfig(t *testing.T, enabled *bool, path string) {
+	t.Helper()
+	cfg := config.GetConfig()
+	previousEnabled := cfg.MetricsEnabled
+	previousPath := cfg.MetricsPath
+
+	cfg.MetricsEnabled = enabled
+	cfg.MetricsPath = path
+
+	t.Cleanup(func() {
+		cfg.MetricsEnabled = previousEnabled
+		cfg.MetricsPath = previousPath
 	})
 }

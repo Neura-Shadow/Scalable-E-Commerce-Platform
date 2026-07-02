@@ -15,6 +15,8 @@ http_idle_timeout_seconds: 60
 http_read_header_timeout_seconds: 5
 http_max_header_bytes: 1048576
 max_request_body_bytes: 1048576
+metrics_enabled: true
+metrics_path: /metrics
 
 order_idempotency_ttl_seconds: 86400
 order_rate_limit_limit: 120

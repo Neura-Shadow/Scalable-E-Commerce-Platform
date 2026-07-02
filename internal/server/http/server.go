@@ -31,6 +31,7 @@ import (
 	userHttp "goshop/internal/user/port/http"
 	"goshop/pkg/config"
 	"goshop/pkg/dbs"
+	appMetrics "goshop/pkg/metrics"
 	"goshop/pkg/middleware"
 	"goshop/pkg/redis"
 	"goshop/pkg/response"
@@ -48,6 +49,7 @@ func NewServer(validator validation.Validation, db dbs.IDatabase, cache redis.IR
 	engine := gin.Default()
 	_ = engine.SetTrustedProxies(nil)
 	engine.Use(middleware.MaxBodyBytes(config.MaxRequestBodyBytes()))
+	engine.Use(middleware.HTTPMetrics())
 
 	return &Server{
 		engine:    engine,
@@ -108,6 +110,9 @@ func (s Server) MapRoutes() error {
 	s.engine.GET("/health", func(c *gin.Context) {
 		response.JSON(c, http.StatusOK, nil)
 	})
+	if config.MetricsEnabled() {
+		s.engine.GET(config.MetricsPath(), gin.WrapH(appMetrics.Handler()))
+	}
 	v1 := s.engine.Group("/api/v1")
 	userHttp.Routes(v1, s.db, s.validator)
 	productHttp.Routes(v1, s.db, s.validator, s.cache)

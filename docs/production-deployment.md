@@ -37,6 +37,8 @@ http_idle_timeout_seconds
 http_read_header_timeout_seconds
 http_max_header_bytes
 max_request_body_bytes
+metrics_enabled
+metrics_path
 order_idempotency_ttl_seconds
 order_rate_limit_limit
 order_rate_limit_window_seconds
@@ -92,6 +94,29 @@ GET /health
 ```
 
 Use this endpoint for readiness/liveness checks at the platform layer.
+
+The metrics endpoint is enabled by default:
+
+```text
+GET /metrics
+```
+
+In production, expose it only to trusted Prometheus scrapers or restrict it behind an internal reverse proxy. Disable it in the app if the platform supplies metrics another way:
+
+```yaml
+metrics_enabled: false
+metrics_path: /metrics
+```
+
+Recommended Prometheus scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: goshop-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8888"]
+```
 
 ## Database operations
 
@@ -166,10 +191,48 @@ Recommended outbox metrics:
 - `outbox_dead_letter_count`
 - `outbox_publish_latency_ms`
 - `outbox_oldest_pending_age_seconds`
+- `outbox_publish_attempt_total`
+- `outbox_publish_success_total`
+- `outbox_publish_failure_total`
+- `outbox_publish_duration_seconds`
+- `outbox_consumer_read_total`
+- `outbox_consumer_ack_total`
+- `outbox_consumer_failure_total`
+- `outbox_consumer_duplicate_skipped_total`
+- `outbox_consumer_stale_claim_total`
+- `outbox_consumer_dead_letter_total`
 - Redis stream length and consumer group pending count
 - stale claimed message count
 - duplicate skipped count
 - dead-letter stream length and growth rate
+
+Recommended dashboard panels:
+
+- HTTP request rate and status mix
+- p95/p99 HTTP request latency
+- order placement rate
+- order error rate by `reason`
+- p95/p99 order latency
+- idempotency duplicate count
+- rate-limited order requests
+- outbox publish success/failure
+- Redis Streams consumer pending and stale-claim behavior
+- DLQ growth
+
+Alert ideas:
+
+- sustained DLQ growth
+- rising insufficient stock conflicts
+- outbox publish failure spike
+- consumer failure spike
+- high p99 latency
+- Redis stream pending growth
+
+Label cardinality rules:
+
+- allowed labels: `method`, `path`, `status`, `event_type`, `result`, and `reason`
+- use normalized route patterns, not raw URL paths
+- never label by user ID, order ID, event ID, idempotency key, raw Redis key, JWT claims, or payload contents
 
 ## Security checklist
 
@@ -189,10 +252,11 @@ Recommended outbox metrics:
 3. Apply database migrations.
 4. Deploy the API with new configuration.
 5. Verify `/health`.
-6. Run a smoke test for login and order placement.
-7. Verify that successful order placement creates one pending `order.created` outbox row.
-8. If Redis Streams publishing is enabled, verify that `stream:orders` receives an entry and the outbox row is marked `published`.
-9. If Redis Streams consuming is enabled, verify that group `order-events` exists and messages are acknowledged after the log/no-op handler succeeds.
-10. Verify `XLEN stream:orders:dead_letter`, `XRANGE stream:orders:dead_letter - +`, and `XPENDING stream:orders order-events` during rollout.
-11. Monitor order failure logs, rate-limited counts, outbox dead-letter counts, stream length, pending entries, stale claims, duplicate skips, and latency.
-12. Roll back if error rate, outbox failures, consumer failures, dead-letter growth, or latency exceed the deployment threshold.
+6. Verify `/metrics` from the Prometheus network path if metrics are enabled.
+7. Run a smoke test for login and order placement.
+8. Verify that successful order placement creates one pending `order.created` outbox row.
+9. If Redis Streams publishing is enabled, verify that `stream:orders` receives an entry and the outbox row is marked `published`.
+10. If Redis Streams consuming is enabled, verify that group `order-events` exists and messages are acknowledged after the log/no-op handler succeeds.
+11. Verify `XLEN stream:orders:dead_letter`, `XRANGE stream:orders:dead_letter - +`, and `XPENDING stream:orders order-events` during rollout.
+12. Monitor order failure logs, rate-limited counts, outbox dead-letter counts, stream length, pending entries, stale claims, duplicate skips, metrics scrape health, and latency.
+13. Roll back if error rate, outbox failures, consumer failures, dead-letter growth, metrics scrape failures, or latency exceed the deployment threshold.

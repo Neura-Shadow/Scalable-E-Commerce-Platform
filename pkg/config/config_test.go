@@ -69,3 +69,28 @@ func TestOutboxConsumerConfigDefaults(t *testing.T) {
 	assert.Equal(t, secondsOrDefault(0, DefaultOutboxConsumerFailureTTLSeconds), OutboxConsumerFailureTTL())
 	assert.Equal(t, DefaultOutboxDeadLetterStreamName, OutboxDeadLetterStreamName())
 }
+
+func TestMetricsConfigDefaults(t *testing.T) {
+	previousEnabled := cfg.MetricsEnabled
+	previousPath := cfg.MetricsPath
+	cfg.MetricsEnabled = nil
+	cfg.MetricsPath = ""
+	t.Cleanup(func() {
+		cfg.MetricsEnabled = previousEnabled
+		cfg.MetricsPath = previousPath
+	})
+
+	assert.True(t, MetricsEnabled())
+	assert.Equal(t, DefaultMetricsPath, MetricsPath())
+}
+
+func TestMetricsConfigCanBeDisabled(t *testing.T) {
+	previousEnabled := cfg.MetricsEnabled
+	disabled := false
+	cfg.MetricsEnabled = &disabled
+	t.Cleanup(func() {
+		cfg.MetricsEnabled = previousEnabled
+	})
+
+	assert.False(t, MetricsEnabled())
+}

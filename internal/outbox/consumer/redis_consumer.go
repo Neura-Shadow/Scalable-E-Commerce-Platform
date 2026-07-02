@@ -9,6 +9,7 @@ import (
 
 	"github.com/quangdangfit/gocommon/logger"
 
+	appMetrics "goshop/pkg/metrics"
 	"goshop/pkg/redis"
 )
 
@@ -215,6 +216,7 @@ func (c *RedisConsumer) ClaimStaleOnce(ctx context.Context) (BatchResult, error)
 	if err != nil {
 		return BatchResult{}, fmt.Errorf("claim stale redis stream messages: %w", err)
 	}
+	appMetrics.RecordOutboxConsumerStaleClaim(len(messages))
 	result, err := c.processMessages(ctx, messages)
 	result.NextClaimStart = nextStart
 	if err != nil {
@@ -241,87 +243,115 @@ func (c *RedisConsumer) processMessages(ctx context.Context, messages []redis.Re
 	for _, message := range messages {
 		event, err := ParseStreamMessage(message)
 		if err != nil {
+			eventType := messageEventType(message)
+			appMetrics.RecordOutboxConsumerRead(eventType, 1)
+			appMetrics.RecordOutboxConsumerFailure(eventType, "invalid_payload")
 			result.Invalid++
 			result.Failed++
 			if deadLetterErr := c.deadLetterInvalidMessage(ctx, message, err); deadLetterErr != nil {
+				appMetrics.RecordOutboxConsumerDeadLetter(eventType, "parse_error", "failure")
 				logger.Error("outbox_consumer_dead_letter_invalid_failed stream_message_id="+message.ID, deadLetterErr)
 				continue
 			}
+			appMetrics.RecordOutboxConsumerDeadLetter(eventType, "parse_error", "success")
 			result.DeadLettered++
 			if err := c.ackMessageID(ctx, message.ID); err != nil {
+				appMetrics.RecordOutboxConsumerAck(eventType, "failure")
 				logger.Error("outbox_consumer_ack_invalid_dead_letter_failed stream_message_id="+message.ID, err)
 				continue
 			}
+			appMetrics.RecordOutboxConsumerAck(eventType, "success")
 			result.Acked++
 			logger.Error("outbox_consumer_invalid_message stream_message_id="+message.ID, err)
 			continue
 		}
+		appMetrics.RecordOutboxConsumerRead(event.EventType, 1)
 
 		processed, err := c.processedStore.WasProcessed(ctx, event.EventID)
 		if err != nil {
 			result.Failed++
+			appMetrics.RecordOutboxConsumerFailure(event.EventType, "idempotency_check")
 			logger.Error("outbox_consumer_idempotency_check_failed event_id="+event.EventID+" stream_message_id="+event.MessageID, err)
 			continue
 		}
 		if processed {
 			if err := c.ack(ctx, event); err != nil {
 				result.Failed++
+				appMetrics.RecordOutboxConsumerAck(event.EventType, "failure")
+				appMetrics.RecordOutboxConsumerFailure(event.EventType, "ack_duplicate")
 				logger.Error("outbox_consumer_ack_duplicate_failed event_id="+event.EventID+" stream_message_id="+event.MessageID, err)
 				continue
 			}
 			result.Skipped++
 			result.Acked++
+			appMetrics.RecordOutboxConsumerDuplicateSkipped(event.EventType)
+			appMetrics.RecordOutboxConsumerAck(event.EventType, "success")
 			logger.Info("outbox_consumer_duplicate_skipped event_id=", event.EventID, " stream_message_id=", event.MessageID)
 			continue
 		}
 
 		if err := c.handler.Handle(ctx, event); err != nil {
 			result.Failed++
+			appMetrics.RecordOutboxConsumerFailure(event.EventType, "handler_error")
 			failureCount, recordErr := c.recordFailure(ctx, event)
 			if recordErr != nil {
+				appMetrics.RecordOutboxConsumerFailure(event.EventType, "failure_counter")
 				logger.Error("outbox_consumer_failure_counter_failed event_id="+event.EventID+" stream_message_id="+event.MessageID, recordErr)
 				continue
 			}
 			if failureCount >= c.maxDeliveryAttempts {
 				if deadLetterErr := c.deadLetterEvent(ctx, event, failureCount, "handler_error", err); deadLetterErr != nil {
+					appMetrics.RecordOutboxConsumerDeadLetter(event.EventType, "handler_error", "failure")
 					logger.Error("outbox_consumer_dead_letter_failed event_id="+event.EventID+" stream_message_id="+event.MessageID, deadLetterErr)
 					continue
 				}
+				appMetrics.RecordOutboxConsumerDeadLetter(event.EventType, "handler_error", "success")
 				result.DeadLettered++
 				if err := c.ack(ctx, event); err != nil {
+					appMetrics.RecordOutboxConsumerAck(event.EventType, "failure")
 					logger.Error("outbox_consumer_ack_dead_letter_failed event_id="+event.EventID+" stream_message_id="+event.MessageID, err)
 					continue
 				}
+				appMetrics.RecordOutboxConsumerAck(event.EventType, "success")
 				result.Acked++
 				continue
 			}
 			logger.Error("outbox_consumer_handle_failed event_id="+event.EventID+" event_type="+event.EventType+" aggregate_id="+event.AggregateID, err)
 			continue
 		}
+		appMetrics.RecordOutboxConsumerHandlerSuccess(event.EventType)
 
 		if err := c.processedStore.MarkProcessed(ctx, event.EventID); err != nil {
 			if errors.Is(err, ErrAlreadyProcessed) {
 				if ackErr := c.ack(ctx, event); ackErr != nil {
 					result.Failed++
+					appMetrics.RecordOutboxConsumerAck(event.EventType, "failure")
+					appMetrics.RecordOutboxConsumerFailure(event.EventType, "ack_concurrent_duplicate")
 					logger.Error("outbox_consumer_ack_concurrent_duplicate_failed event_id="+event.EventID+" stream_message_id="+event.MessageID, ackErr)
 					continue
 				}
 				result.Skipped++
 				result.Acked++
+				appMetrics.RecordOutboxConsumerDuplicateSkipped(event.EventType)
+				appMetrics.RecordOutboxConsumerAck(event.EventType, "success")
 				continue
 			}
 			result.Failed++
+			appMetrics.RecordOutboxConsumerFailure(event.EventType, "mark_processed")
 			logger.Error("outbox_consumer_mark_processed_failed event_id="+event.EventID+" stream_message_id="+event.MessageID, err)
 			continue
 		}
 
 		if err := c.ack(ctx, event); err != nil {
 			result.Failed++
+			appMetrics.RecordOutboxConsumerAck(event.EventType, "failure")
+			appMetrics.RecordOutboxConsumerFailure(event.EventType, "ack")
 			logger.Error("outbox_consumer_ack_failed event_id="+event.EventID+" stream_message_id="+event.MessageID, err)
 			continue
 		}
 		result.Processed++
 		result.Acked++
+		appMetrics.RecordOutboxConsumerAck(event.EventType, "success")
 	}
 	return result, nil
 }
@@ -425,6 +455,10 @@ func optionalString(values map[string]interface{}, key string) string {
 		return ""
 	}
 	return text
+}
+
+func messageEventType(message redis.RedisStreamMessage) string {
+	return optionalString(message.Values, "event_type")
 }
 
 func streamFieldValueToString(value interface{}) (string, error) {

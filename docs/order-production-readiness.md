@@ -63,6 +63,8 @@ http_idle_timeout_seconds
 http_read_header_timeout_seconds
 http_max_header_bytes
 max_request_body_bytes
+metrics_enabled
+metrics_path
 order_idempotency_ttl_seconds
 order_rate_limit_limit
 order_rate_limit_window_seconds
@@ -80,3 +82,54 @@ Order placement logs concise structured-style events for high-signal cases:
 - order placement latency on failure and duplicate paths
 
 These logs avoid storing full request payloads or idempotency key values.
+
+The application also exposes Prometheus metrics at `/metrics` by default. Disable or move it with:
+
+```yaml
+metrics_enabled: true
+metrics_path: /metrics
+```
+
+Recommended scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: goshop-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8888"]
+```
+
+Order-facing metric families:
+
+- `http_requests_total`
+- `http_request_duration_seconds`
+- `order_place_total`
+- `order_place_failed_total`
+- `order_place_duration_seconds`
+- `order_idempotency_duplicate_total`
+- `order_rate_limited_total`
+- `inventory_insufficient_stock_total`
+- `outbox_events_created_total`
+
+Recommended dashboard panels:
+
+- order placement rate
+- order error rate by `reason`
+- p95/p99 order latency from `order_place_duration_seconds`
+- idempotency duplicate count split by replay vs in-flight conflict
+- rate-limited order requests
+- insufficient stock conflicts
+
+Alert ideas:
+
+- rising insufficient stock conflicts
+- rate-limited order requests above expected checkout traffic
+- high p99 order latency
+- sudden increase in internal order placement failures
+
+Label cardinality rules:
+
+- allowed labels are `method`, `path`, `status`, `event_type`, `result`, and `reason`
+- use normalized Gin route paths such as `/api/v1/orders/:id`
+- never label by `user_id`, `order_id`, `event_id`, idempotency key, raw Redis key, JWT subject, or request payload fields

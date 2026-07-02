@@ -273,11 +273,25 @@ Recommended metrics and logs:
 - `outbox_dead_letter_count`
 - `outbox_publish_latency_ms`
 - `outbox_oldest_pending_age_seconds`
+- `outbox_events_created_total`
+- `outbox_publish_attempt_total`
+- `outbox_publish_success_total`
+- `outbox_publish_failure_total`
+- `outbox_publish_duration_seconds`
+- `outbox_dead_letter_total`
+- `outbox_consumer_read_total`
+- `outbox_consumer_ack_total`
+- `outbox_consumer_failure_total`
 - `outbox_consumer_duplicate_skipped_count`
+- `outbox_consumer_duplicate_skipped_total`
+- `outbox_consumer_stale_claim_total`
 - `outbox_consumer_dead_letter_count`
+- `outbox_consumer_dead_letter_total`
 - Redis consumer group pending count
 
 Current logs include batch completion counts, publish failures, consumer failures, dead-letter counts, duplicate skip counts, event type, event ID, and aggregate ID. Payloads are intentionally not logged by default.
+
+Prometheus labels for outbox and consumer metrics are bounded to `event_type`, `result`, and `reason`. Do not add event IDs, aggregate IDs, order IDs, raw Redis keys, or payload values as metric labels.
 
 ## Migration note
 

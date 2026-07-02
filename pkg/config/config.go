@@ -22,6 +22,7 @@ const (
 	DefaultHTTPReadHeaderTimeoutSeconds      = 5
 	DefaultHTTPMaxHeaderBytes                = 1 << 20
 	DefaultMaxRequestBodyBytes               = 1 << 20
+	DefaultMetricsPath                       = "/metrics"
 	DefaultOrderIdempotencyTTLSeconds        = 24 * 60 * 60
 	DefaultOrderRateLimitLimit               = 120
 	DefaultOrderRateLimitWindowSeconds       = 60
@@ -60,12 +61,14 @@ type Schema struct {
 	RedisPassword string `env:"redis_password"`
 	RedisDB       int    `env:"redis_db"`
 
-	HTTPReadTimeoutSeconds       int   `env:"http_read_timeout_seconds"`
-	HTTPWriteTimeoutSeconds      int   `env:"http_write_timeout_seconds"`
-	HTTPIdleTimeoutSeconds       int   `env:"http_idle_timeout_seconds"`
-	HTTPReadHeaderTimeoutSeconds int   `env:"http_read_header_timeout_seconds"`
-	HTTPMaxHeaderBytes           int   `env:"http_max_header_bytes"`
-	MaxRequestBodyBytes          int64 `env:"max_request_body_bytes"`
+	HTTPReadTimeoutSeconds       int    `env:"http_read_timeout_seconds"`
+	HTTPWriteTimeoutSeconds      int    `env:"http_write_timeout_seconds"`
+	HTTPIdleTimeoutSeconds       int    `env:"http_idle_timeout_seconds"`
+	HTTPReadHeaderTimeoutSeconds int    `env:"http_read_header_timeout_seconds"`
+	HTTPMaxHeaderBytes           int    `env:"http_max_header_bytes"`
+	MaxRequestBodyBytes          int64  `env:"max_request_body_bytes"`
+	MetricsEnabled               *bool  `env:"metrics_enabled"`
+	MetricsPath                  string `env:"metrics_path"`
 
 	OrderIdempotencyTTLSeconds  int   `env:"order_idempotency_ttl_seconds"`
 	OrderRateLimitLimit         int64 `env:"order_rate_limit_limit"`
@@ -144,6 +147,20 @@ func MaxRequestBodyBytes() int64 {
 		return DefaultMaxRequestBodyBytes
 	}
 	return cfg.MaxRequestBodyBytes
+}
+
+func MetricsEnabled() bool {
+	if cfg.MetricsEnabled == nil {
+		return true
+	}
+	return *cfg.MetricsEnabled
+}
+
+func MetricsPath() string {
+	if cfg.MetricsPath == "" {
+		return DefaultMetricsPath
+	}
+	return cfg.MetricsPath
 }
 
 func OrderIdempotencyTTL() time.Duration {

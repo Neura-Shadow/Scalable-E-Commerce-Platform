@@ -132,6 +132,27 @@ redis-cli XPENDING stream:orders order-events
 
 Monitor duplicate skip counts from consumer batch logs and alert on sustained dead-letter stream growth.
 
+### Prometheus Metrics
+
+The API exposes a lightweight Prometheus-style endpoint at `/metrics` by default:
+
+```yaml
+metrics_enabled: true
+metrics_path: /metrics
+```
+
+Recommended scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: goshop-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8888"]
+```
+
+Important metric families include HTTP request totals/durations, order placement outcomes, idempotency duplicates, rate-limited orders, insufficient stock conflicts, outbox publish attempts/success/failure, consumer reads/acks/failures, duplicate skips, stale claims, and dead-letter writes. Labels are intentionally bounded to `method`, `path`, `status`, `event_type`, `result`, and `reason`; do not add user IDs, order IDs, event IDs, idempotency keys, or raw Redis keys as labels.
+
 ## Permission Model
 
 - Public users can list/read products and inventory.
@@ -183,6 +204,12 @@ Health check:
 
 ```bash
 curl http://localhost:8888/health
+```
+
+Prometheus metrics:
+
+```bash
+curl http://localhost:8888/metrics
 ```
 
 Swagger UI:
@@ -251,7 +278,7 @@ curl -X PUT http://localhost:8888/api/v1/inventory/<product_id> \
 ## Documentation
 
 - `docs/order-transaction-safety.md`: transaction boundary and overselling prevention.
-- `docs/order-production-readiness.md`: idempotency, rate limiting, HTTP hardening, and observability.
+- `docs/order-production-readiness.md`: idempotency, rate limiting, HTTP hardening, and Prometheus observability.
 - `docs/load-testing.md`: load, concurrency, and optional outbox publisher testing guidance.
 - `docs/production-deployment.md`: production deployment checklist and operational notes.
 - `docs/order-outbox-pattern.md`: transactional outbox foundation, Redis Streams publishing, and consumer group foundation.
@@ -263,6 +290,7 @@ curl -X PUT http://localhost:8888/api/v1/inventory/<product_id> \
 - Use environment variables or a secret manager for production secrets.
 - Run PostgreSQL and Redis as managed services or hardened containers.
 - Put the API behind TLS at the edge.
+- Expose `/metrics` only to trusted Prometheus scrapers or behind a restricted reverse proxy in production.
 - Tune order rate limits to match real checkout traffic.
 - Add persistent migrations before using this project for a long-lived production database.
 - Move the auto-migrated `outbox_events` table to explicit migrations before long-lived production use.

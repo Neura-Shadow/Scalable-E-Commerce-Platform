@@ -17,6 +17,7 @@ import (
 	"goshop/internal/order/dto"
 	"goshop/internal/order/model"
 	"goshop/pkg/config"
+	appMetrics "goshop/pkg/metrics"
 	"goshop/pkg/paging"
 	"goshop/pkg/redis"
 	"goshop/pkg/response"
@@ -102,28 +103,35 @@ func (a *OrderHandler) PlaceOrder(c *gin.Context) {
 	var req dto.PlaceOrderReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		logger.Error("Failed to get body", err)
+		recordOrderPlaceMetric("failure", "invalid_request", startedAt)
 		response.Error(c, http.StatusBadRequest, err, "Invalid parameters")
 		return
 	}
 
 	req.UserID = c.GetString("userId")
 	if req.UserID == "" {
+		recordOrderPlaceMetric("failure", "unauthorized", startedAt)
 		response.Error(c, http.StatusUnauthorized, errors.New("unauthorized"), "Unauthorized")
 		return
 	}
 
 	if !a.allowOrderPlacement(c, req.UserID) {
 		logger.Errorf("order_place_rate_limited user_id=%s", req.UserID)
+		recordOrderPlaceMetric("failure", "rate_limited", startedAt)
 		return
 	}
 
 	idempotencyKey := strings.TrimSpace(c.GetHeader(idempotencyHeader))
-	cacheKey, acquired, handled := a.beginIdempotentOrder(c, req.UserID, idempotencyKey)
+	cacheKey, acquired, handled, handledReason := a.beginIdempotentOrder(c, req.UserID, idempotencyKey)
 	if handled {
-		logger.Errorf("order_place_idempotency_duplicate user_id=%s latency_ms=%d", req.UserID, time.Since(startedAt).Milliseconds())
+		if strings.HasPrefix(handledReason, "duplicate_") {
+			logger.Errorf("order_place_idempotency_duplicate user_id=%s latency_ms=%d", req.UserID, time.Since(startedAt).Milliseconds())
+		}
+		recordHandledIdempotencyMetric(handledReason, startedAt)
 		return
 	}
 	if cacheKey != "" && !acquired {
+		recordOrderPlaceMetric("failure", "duplicate_request", startedAt)
 		response.Error(c, http.StatusConflict, errors.New("duplicate request"), "Duplicate request")
 		return
 	}
@@ -132,21 +140,27 @@ func (a *OrderHandler) PlaceOrder(c *gin.Context) {
 	if err != nil {
 		a.releaseIdempotencyOnFailure(cacheKey)
 		status, message := orderPlacementErrorResponse(err)
+		reason := orderPlacementMetricReason(err)
+		if reason == "insufficient_stock" {
+			appMetrics.RecordInventoryInsufficientStock()
+		}
+		recordOrderPlaceMetric("failure", reason, startedAt)
 		logger.Errorf("order_place_failed user_id=%s category=%s latency_ms=%d error=%s", req.UserID, message, time.Since(startedAt).Milliseconds(), err)
 		response.Error(c, status, err, message)
 		return
 	}
 
 	a.completeIdempotentOrder(cacheKey, order.ID)
+	recordOrderPlaceMetric("success", "created", startedAt)
 
 	var res dto.Order
 	utils.Copy(&res, &order)
 	response.JSON(c, http.StatusOK, res)
 }
 
-func (a *OrderHandler) beginIdempotentOrder(c *gin.Context, userID, idempotencyKey string) (string, bool, bool) {
+func (a *OrderHandler) beginIdempotentOrder(c *gin.Context, userID, idempotencyKey string) (string, bool, bool, string) {
 	if a.cache == nil || idempotencyKey == "" {
-		return "", false, false
+		return "", false, false, ""
 	}
 
 	cacheKey := orderIdempotencyRedisKey(userID, idempotencyKey)
@@ -154,35 +168,39 @@ func (a *OrderHandler) beginIdempotentOrder(c *gin.Context, userID, idempotencyK
 	if err != nil {
 		logger.Errorf("order_place_idempotency_start_failed user_id=%s error=%s", userID, err)
 		response.Error(c, http.StatusInternalServerError, err, "Something went wrong")
-		return cacheKey, false, true
+		return cacheKey, false, true, "idempotency_start_failed"
 	}
 	if acquired {
-		return cacheKey, true, false
+		return cacheKey, true, false, ""
 	}
 
 	var record idempotencyRecord
 	if err := a.cache.Get(cacheKey, &record); err != nil {
 		logger.Errorf("order_place_idempotency_lookup_failed user_id=%s error=%s", userID, err)
 		response.Error(c, http.StatusConflict, err, "Duplicate request")
-		return cacheKey, false, true
+		appMetrics.RecordOrderIdempotencyDuplicate("lookup_failed")
+		return cacheKey, false, true, "duplicate_lookup_failed"
 	}
 
 	if record.Status != idempotencyStatusSucceeded || record.OrderID == "" {
 		response.Error(c, http.StatusConflict, errors.New("duplicate request in progress"), "Duplicate request in progress")
-		return cacheKey, false, true
+		appMetrics.RecordOrderIdempotencyDuplicate("in_flight")
+		return cacheKey, false, true, "duplicate_in_flight"
 	}
 
 	order, err := a.service.GetOrderByID(c, record.OrderID, userID)
 	if err != nil {
 		logger.Errorf("order_place_idempotency_order_lookup_failed user_id=%s order_id=%s error=%s", userID, record.OrderID, err)
 		response.Error(c, http.StatusConflict, err, "Duplicate request")
-		return cacheKey, false, true
+		appMetrics.RecordOrderIdempotencyDuplicate("order_lookup_failed")
+		return cacheKey, false, true, "duplicate_order_lookup_failed"
 	}
 
 	var res dto.Order
 	utils.Copy(&res, &order)
 	response.JSON(c, http.StatusOK, res)
-	return cacheKey, false, true
+	appMetrics.RecordOrderIdempotencyDuplicate("replay")
+	return cacheKey, false, true, "duplicate_replay"
 }
 
 func (a *OrderHandler) completeIdempotentOrder(cacheKey, orderID string) {
@@ -223,6 +241,7 @@ func (a *OrderHandler) allowOrderPlacement(c *gin.Context, userID string) bool {
 		return true
 	}
 
+	appMetrics.RecordOrderRateLimited("rate_limited")
 	response.Error(c, http.StatusTooManyRequests, errors.New("rate limited"), "Too many requests")
 	return false
 }
@@ -233,6 +252,28 @@ func orderPlacementErrorResponse(err error) (int, string) {
 	}
 
 	return http.StatusInternalServerError, "Something went wrong"
+}
+
+func orderPlacementMetricReason(err error) string {
+	if errors.Is(err, inventoryService.ErrInsufficientStock) {
+		return "insufficient_stock"
+	}
+	return "internal_failure"
+}
+
+func recordHandledIdempotencyMetric(reason string, startedAt time.Time) {
+	switch reason {
+	case "duplicate_replay":
+		recordOrderPlaceMetric("duplicate", reason, startedAt)
+	case "duplicate_in_flight", "duplicate_lookup_failed", "duplicate_order_lookup_failed":
+		recordOrderPlaceMetric("failure", reason, startedAt)
+	default:
+		recordOrderPlaceMetric("failure", "idempotency_error", startedAt)
+	}
+}
+
+func recordOrderPlaceMetric(result, reason string, startedAt time.Time) {
+	appMetrics.RecordOrderPlace(result, reason, time.Since(startedAt))
 }
 
 func orderIdempotencyRedisKey(userID, idempotencyKey string) string {

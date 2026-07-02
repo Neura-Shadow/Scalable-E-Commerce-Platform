@@ -15,11 +15,13 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 
+	inventoryService "goshop/internal/inventory/service"
 	"goshop/internal/order/dto"
 	"goshop/internal/order/model"
 	"goshop/internal/order/service/mocks"
 	productMocks "goshop/internal/product/service/mocks"
 	"goshop/pkg/config"
+	appMetrics "goshop/pkg/metrics"
 	"goshop/pkg/paging"
 	redisMocks "goshop/pkg/redis/mocks"
 	"goshop/pkg/response"
@@ -159,6 +161,7 @@ func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderFirstIdempotentReques
 }
 
 func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderDuplicateIdempotencyReturnsStoredOrder() {
+	appMetrics.ResetForTest()
 	req := &dto.PlaceOrderReq{
 		Lines: []dto.PlaceOrderLineReq{
 			{
@@ -198,15 +201,23 @@ func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderDuplicateIdempotencyR
 
 	handler.PlaceOrder(ctx)
 
+	snapshot, err := appMetrics.SnapshotText()
+	suite.NoError(err)
 	var res response.Response
 	var orderRes dto.Order
 	_ = json.Unmarshal(writer.Body.Bytes(), &res)
 	utils.Copy(&orderRes, &res.Result)
 	suite.Equal(http.StatusOK, writer.Code)
 	suite.Equal("orderId1", orderRes.ID)
+	suite.Contains(snapshot, "order_idempotency_duplicate_total")
+	suite.Contains(snapshot, `reason="replay"`)
+	suite.NotContains(snapshot, "123456")
+	suite.NotContains(snapshot, "orderId1")
+	suite.NotContains(snapshot, "checkout-123")
 }
 
 func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderRateLimited() {
+	appMetrics.ResetForTest()
 	req := &dto.PlaceOrderReq{
 		Lines: []dto.PlaceOrderLineReq{
 			{
@@ -231,8 +242,13 @@ func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderRateLimited() {
 
 	var res map[string]map[string]string
 	_ = json.Unmarshal(writer.Body.Bytes(), &res)
+	snapshot, err := appMetrics.SnapshotText()
+	suite.NoError(err)
 	suite.Equal(http.StatusTooManyRequests, writer.Code)
 	suite.Equal("Too many requests", res["error"]["message"])
+	suite.Contains(snapshot, "order_rate_limited_total")
+	suite.Contains(snapshot, `reason="rate_limited"`)
+	suite.NotContains(snapshot, "123456")
 }
 
 func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderInvalidProductIdType() {
@@ -326,6 +342,35 @@ func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderFail() {
 	_ = json.Unmarshal(writer.Body.Bytes(), &res)
 	suite.Equal(http.StatusInternalServerError, writer.Code)
 	suite.Equal("Something went wrong", res["error"]["message"])
+}
+
+func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderInsufficientStockIncrementsMetrics() {
+	appMetrics.ResetForTest()
+	req := &dto.PlaceOrderReq{
+		Lines: []dto.PlaceOrderLineReq{
+			{
+				ProductID: "productId1",
+				Quantity:  2,
+			},
+		},
+	}
+
+	ctx, writer := suite.prepareContext(req)
+	ctx.Set("userId", "123456")
+	req.UserID = "123456"
+
+	suite.mockService.On("PlaceOrder", mock.Anything, req).
+		Return(nil, inventoryService.ErrInsufficientStock).Times(1)
+
+	suite.handler.PlaceOrder(ctx)
+
+	snapshot, err := appMetrics.SnapshotText()
+	suite.NoError(err)
+	suite.Equal(http.StatusConflict, writer.Code)
+	suite.Contains(snapshot, "order_place_failed_total")
+	suite.Contains(snapshot, `reason="insufficient_stock"`)
+	suite.Contains(snapshot, "inventory_insufficient_stock_total")
+	suite.NotContains(snapshot, "123456")
 }
 
 // Get Order Detail

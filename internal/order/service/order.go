@@ -7,6 +7,7 @@ import (
 
 	"goshop/internal/order/dto"
 	"goshop/internal/order/model"
+	appMetrics "goshop/pkg/metrics"
 	"goshop/pkg/paging"
 	"goshop/pkg/utils"
 )
@@ -103,6 +104,7 @@ func (s *OrderService) PlaceOrder(ctx context.Context, req *dto.PlaceOrderReq) (
 			if _, err := outbox.CreatePending(ctx, orderAggregateType, created.ID, OrderCreatedEventType, buildOrderCreatedPayload(created)); err != nil {
 				return err
 			}
+			appMetrics.RecordOutboxEventCreated(OrderCreatedEventType)
 		}
 
 		order = created

@@ -12,6 +12,7 @@ import (
 
 	"github.com/quangdangfit/gocommon/logger"
 	"goshop/pkg/config"
+	appMetrics "goshop/pkg/metrics"
 	"goshop/pkg/redis"
 	redisMocks "goshop/pkg/redis/mocks"
 )
@@ -148,6 +149,7 @@ func TestRedisConsumerRunOnceDoesNotAckWhenHandlerFails(t *testing.T) {
 }
 
 func TestRedisConsumerRunOnceDeadLettersHandlerFailureAtMaxAttempts(t *testing.T) {
+	appMetrics.ResetForTest()
 	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
 	handlerErr := errors.New("handler failed")
 	message := validRedisMessage("redis-id-1", "evt-1", now)
@@ -195,6 +197,13 @@ func TestRedisConsumerRunOnceDeadLettersHandlerFailureAtMaxAttempts(t *testing.T
 	assert.Equal(t, 1, result.Failed)
 	assert.Equal(t, 1, result.DeadLettered)
 	assert.Equal(t, 1, result.Acked)
+	snapshot, err := appMetrics.SnapshotText()
+	require.NoError(t, err)
+	assert.Contains(t, snapshot, "outbox_consumer_dead_letter_total")
+	assert.Contains(t, snapshot, `reason="handler_error"`)
+	assert.Contains(t, snapshot, `result="success"`)
+	assert.NotContains(t, snapshot, "evt-1")
+	assert.NotContains(t, snapshot, "redis-id-1")
 }
 
 func TestRedisConsumerRunOnceDoesNotAckWhenDeadLetterWriteFails(t *testing.T) {
@@ -231,6 +240,7 @@ func TestRedisConsumerRunOnceDoesNotAckWhenDeadLetterWriteFails(t *testing.T) {
 }
 
 func TestRedisConsumerRunOnceSkipsDuplicateEventAndAcknowledges(t *testing.T) {
+	appMetrics.ResetForTest()
 	cache := redisMocks.NewIRedis(t)
 	cache.On("XReadGroup", mock.Anything, "order-events", "local-consumer-1", "stream:orders", int64(10), 5*time.Second).
 		Return([]redis.RedisStreamMessage{validRedisMessage("redis-id-1", "evt-1", time.Now().UTC())}, nil).
@@ -249,6 +259,13 @@ func TestRedisConsumerRunOnceSkipsDuplicateEventAndAcknowledges(t *testing.T) {
 	assert.Equal(t, 1, result.Acked)
 	assert.Empty(t, handler.events)
 	assert.Empty(t, store.marked)
+	snapshot, err := appMetrics.SnapshotText()
+	require.NoError(t, err)
+	assert.Contains(t, snapshot, "outbox_consumer_duplicate_skipped_total")
+	assert.Contains(t, snapshot, "outbox_consumer_ack_total")
+	assert.Contains(t, snapshot, `event_type="order.created"`)
+	assert.NotContains(t, snapshot, "evt-1")
+	assert.NotContains(t, snapshot, "redis-id-1")
 }
 
 func TestRedisProcessedEventStoreMarksAndChecksProcessedEvent(t *testing.T) {

@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/quangdangfit/gocommon/logger"
+
+	appMetrics "goshop/pkg/metrics"
 )
 
 const (
@@ -110,22 +112,30 @@ func (w *PublisherWorker) RunOnce(ctx context.Context) (PublishBatchResult, erro
 		result.Fetched = len(events)
 
 		for _, event := range events {
+			appMetrics.RecordOutboxPublishAttempt(event.EventType)
+			eventStartedAt := w.now()
 			if err := w.publisher.Publish(ctx, event); err != nil {
+				publishDuration := w.now().Sub(eventStartedAt)
+				appMetrics.RecordOutboxPublishFailure(event.EventType, "publish_error", publishDuration)
 				result.Failed++
 				willDeadLetter := event.Attempts+1 >= w.maxAttempts
 				if recordErr := outbox.RecordPublishFailure(ctx, event); recordErr != nil {
+					appMetrics.RecordOutboxPublishFailure(event.EventType, "record_publish_failure", 0)
 					return recordErr
 				}
 				if willDeadLetter {
 					result.DeadLettered++
+					appMetrics.RecordOutboxDeadLetter(event.EventType, "publish_exhausted")
 				}
 				logger.Error("outbox_publish_failed event_id="+event.ID+" event_type="+event.EventType+" aggregate_id="+event.AggregateID, err)
 				continue
 			}
 
 			if err := outbox.MarkPublished(ctx, event.ID); err != nil {
+				appMetrics.RecordOutboxPublishFailure(event.EventType, "mark_published_failed", w.now().Sub(eventStartedAt))
 				return err
 			}
+			appMetrics.RecordOutboxPublishSuccess(event.EventType, w.now().Sub(eventStartedAt))
 			result.Published++
 			logger.Info("outbox_published event_id=", event.ID, " event_type=", event.EventType, " aggregate_id=", event.AggregateID)
 		}
