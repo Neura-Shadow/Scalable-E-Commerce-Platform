@@ -1,9 +1,11 @@
 package config
 
 import (
+	"fmt"
 	"log"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/caarlos0/env"
@@ -111,8 +113,30 @@ func LoadConfig() *Schema {
 	if err := env.Parse(&cfg); err != nil {
 		log.Fatalf("Error on parsing configuration file, error: %v", err)
 	}
+	if err := validateConfig(cfg); err != nil {
+		log.Fatalf("Invalid configuration, error: %v", err)
+	}
 
 	return &cfg
+}
+
+func validateConfig(cfg Schema) error {
+	if cfg.Environment != ProductionEnv {
+		return nil
+	}
+	if isPlaceholderAuthSecret(cfg.AuthSecret) {
+		return fmt.Errorf("production auth_secret must be set to a non-placeholder value")
+	}
+	return nil
+}
+
+func isPlaceholderAuthSecret(secret string) bool {
+	switch strings.ToLower(strings.TrimSpace(secret)) {
+	case "", "######", "auth_secret", "secret", "change-me", "changeme", "local-dev-secret":
+		return true
+	default:
+		return false
+	}
 }
 
 func GetConfig() *Schema {

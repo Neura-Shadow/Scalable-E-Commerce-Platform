@@ -216,6 +216,53 @@ func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderDuplicateIdempotencyR
 	suite.NotContains(snapshot, "checkout-123")
 }
 
+func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderDuplicateIdempotencyInFlightReturnsConflict() {
+	appMetrics.ResetForTest()
+	req := &dto.PlaceOrderReq{
+		Lines: []dto.PlaceOrderLineReq{
+			{
+				ProductID: "productId1",
+				Quantity:  2,
+			},
+		},
+	}
+	cache := redisMocks.NewIRedis(suite.T())
+	handler := NewOrderHandler(
+		suite.mockService,
+		WithOrderCache(cache),
+		WithOrderRateLimit(0, time.Minute),
+		WithOrderIdempotencyTTL(time.Hour),
+	)
+	ctx, writer := suite.prepareContext(req)
+	ctx.Set("userId", "123456")
+	ctx.Request.Header.Set("Idempotency-Key", "checkout-123")
+	cacheKey := orderIdempotencyRedisKey("123456", "checkout-123")
+
+	cache.On("SetNXWithExpiration", cacheKey, mock.Anything, time.Hour).Return(false, nil).Times(1)
+	cache.On("Get", cacheKey, mock.AnythingOfType("*http.idempotencyRecord")).
+		Run(func(args mock.Arguments) {
+			record := args.Get(1).(*idempotencyRecord)
+			record.Status = idempotencyStatusProcessing
+		}).
+		Return(nil).Times(1)
+
+	handler.PlaceOrder(ctx)
+
+	snapshot, err := appMetrics.SnapshotText()
+	suite.NoError(err)
+	var res map[string]map[string]string
+	_ = json.Unmarshal(writer.Body.Bytes(), &res)
+	suite.Equal(http.StatusConflict, writer.Code)
+	suite.Equal("Duplicate request in progress", res["error"]["message"])
+	suite.Contains(snapshot, "order_idempotency_duplicate_total")
+	suite.Contains(snapshot, `reason="in_flight"`)
+	suite.Contains(snapshot, `reason="duplicate_in_flight"`)
+	suite.NotContains(snapshot, "123456")
+	suite.NotContains(snapshot, "checkout-123")
+	suite.mockService.AssertNotCalled(suite.T(), "PlaceOrder", mock.Anything, mock.Anything)
+	suite.mockService.AssertNotCalled(suite.T(), "GetOrderByID", mock.Anything, mock.Anything, mock.Anything)
+}
+
 func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderRateLimited() {
 	appMetrics.ResetForTest()
 	req := &dto.PlaceOrderReq{

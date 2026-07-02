@@ -3,6 +3,8 @@ package repository
 import (
 	"context"
 
+	"gorm.io/gorm/clause"
+
 	"goshop/internal/product/dto"
 	"goshop/internal/product/model"
 	"goshop/pkg/config"
@@ -22,6 +24,15 @@ type ProductRepo struct {
 	db dbs.IDatabase
 }
 
+var productListOrderColumns = map[string]string{
+	"active":     "active",
+	"code":       "code",
+	"created_at": "created_at",
+	"name":       "name",
+	"price":      "price",
+	"updated_at": "updated_at",
+}
+
 func NewProductRepository(db dbs.IDatabase) *ProductRepo {
 	return &ProductRepo{db: db}
 }
@@ -38,13 +49,7 @@ func (r *ProductRepo) ListProducts(ctx context.Context, req *dto.ListProductReq)
 		query = append(query, dbs.NewQuery("code = ?", req.Code))
 	}
 
-	order := "created_at"
-	if req.OrderBy != "" {
-		order = req.OrderBy
-		if req.OrderDesc {
-			order += " DESC"
-		}
-	}
+	order := productListOrder(req.OrderBy, req.OrderDesc)
 
 	var total int64
 	if err := r.db.Count(ctx, &model.Product{}, &total, dbs.WithQuery(query...)); err != nil {
@@ -66,6 +71,10 @@ func (r *ProductRepo) ListProducts(ctx context.Context, req *dto.ListProductReq)
 	}
 
 	return products, pagination, nil
+}
+
+func productListOrder(orderBy string, desc bool) clause.OrderByColumn {
+	return dbs.SafeOrderByColumn(orderBy, desc, "created_at", productListOrderColumns)
 }
 
 func (r *ProductRepo) GetProductByID(ctx context.Context, id string) (*model.Product, error) {

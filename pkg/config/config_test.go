@@ -94,3 +94,30 @@ func TestMetricsConfigCanBeDisabled(t *testing.T) {
 
 	assert.False(t, MetricsEnabled())
 }
+
+func TestValidateConfigRejectsProductionPlaceholderAuthSecret(t *testing.T) {
+	err := validateConfig(Schema{
+		Environment: ProductionEnv,
+		AuthSecret:  "auth_secret",
+	})
+
+	assert.Error(t, err)
+}
+
+func TestValidateConfigAllowsDevelopmentPlaceholderAuthSecret(t *testing.T) {
+	err := validateConfig(Schema{
+		Environment: "development",
+		AuthSecret:  "auth_secret",
+	})
+
+	assert.NoError(t, err)
+}
+
+func TestValidateConfigAllowsProductionNonPlaceholderAuthSecret(t *testing.T) {
+	err := validateConfig(Schema{
+		Environment: ProductionEnv,
+		AuthSecret:  "replace-with-a-random-secret",
+	})
+
+	assert.NoError(t, err)
+}

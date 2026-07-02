@@ -3,6 +3,8 @@ package repository
 import (
 	"context"
 
+	"gorm.io/gorm/clause"
+
 	"goshop/internal/order/dto"
 	"goshop/internal/order/model"
 	"goshop/pkg/dbs"
@@ -12,6 +14,14 @@ import (
 
 type OrderRepo struct {
 	db dbs.IDatabase
+}
+
+var orderListOrderColumns = map[string]string{
+	"code":        "code",
+	"created_at":  "created_at",
+	"status":      "status",
+	"total_price": "total_price",
+	"updated_at":  "updated_at",
 }
 
 func NewOrderRepository(db dbs.IDatabase) *OrderRepo {
@@ -80,13 +90,7 @@ func (r *OrderRepo) GetMyOrders(ctx context.Context, req *dto.ListOrderReq) ([]*
 		query = append(query, dbs.NewQuery("status = ?", req.Status))
 	}
 
-	order := "created_at"
-	if req.OrderBy != "" {
-		order = req.OrderBy
-		if req.OrderDesc {
-			order += " DESC"
-		}
-	}
+	order := orderListOrder(req.OrderBy, req.OrderDesc)
 
 	var total int64
 	if err := r.db.Count(ctx, &model.Order{}, &total, dbs.WithQuery(query...)); err != nil {
@@ -109,6 +113,10 @@ func (r *OrderRepo) GetMyOrders(ctx context.Context, req *dto.ListOrderReq) ([]*
 	}
 
 	return orders, pagination, nil
+}
+
+func orderListOrder(orderBy string, desc bool) clause.OrderByColumn {
+	return dbs.SafeOrderByColumn(orderBy, desc, "created_at", orderListOrderColumns)
 }
 
 func (r *OrderRepo) UpdateOrder(ctx context.Context, order *model.Order) error {

@@ -27,6 +27,13 @@ type InventoryRepo struct {
 	db dbs.IDatabase
 }
 
+var inventoryListOrderColumns = map[string]string{
+	"created_at": "created_at",
+	"product_id": "product_id",
+	"quantity":   "quantity",
+	"updated_at": "updated_at",
+}
+
 func NewInventoryRepository(db dbs.IDatabase) *InventoryRepo {
 	return &InventoryRepo{db: db}
 }
@@ -40,13 +47,7 @@ func (r *InventoryRepo) List(ctx context.Context, req *dto.ListInventoryReq) ([]
 		query = append(query, dbs.NewQuery("product_id = ?", req.ProductID))
 	}
 
-	order := "created_at"
-	if req.OrderBy != "" {
-		order = req.OrderBy
-		if req.OrderDesc {
-			order += " DESC"
-		}
-	}
+	order := inventoryListOrder(req.OrderBy, req.OrderDesc)
 
 	var total int64
 	if err := r.db.Count(ctx, &model.Inventory{}, &total, dbs.WithQuery(query...)); err != nil {
@@ -68,6 +69,10 @@ func (r *InventoryRepo) List(ctx context.Context, req *dto.ListInventoryReq) ([]
 	}
 
 	return items, pagination, nil
+}
+
+func inventoryListOrder(orderBy string, desc bool) clause.OrderByColumn {
+	return dbs.SafeOrderByColumn(orderBy, desc, "created_at", inventoryListOrderColumns)
 }
 
 func (r *InventoryRepo) GetByProductID(ctx context.Context, productID string) (*model.Inventory, error) {

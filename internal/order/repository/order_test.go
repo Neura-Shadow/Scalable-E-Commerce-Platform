@@ -188,3 +188,17 @@ func (suite *OrderRepositoryTestSuite) TestListOrdersFindFail() {
 	suite.Nil(orders)
 	suite.Nil(pagination)
 }
+
+func (suite *OrderRepositoryTestSuite) TestOrderListOrderUsesAllowedColumn() {
+	order := orderListOrder("total_price", true)
+
+	suite.Equal("total_price", order.Column.Name)
+	suite.True(order.Desc)
+}
+
+func (suite *OrderRepositoryTestSuite) TestOrderListOrderRejectsUnsafeColumn() {
+	order := orderListOrder("created_at; SELECT pg_sleep(10);--", true)
+
+	suite.Equal("created_at", order.Column.Name)
+	suite.False(order.Desc)
+}

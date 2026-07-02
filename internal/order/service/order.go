@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"sort"
 
 	"github.com/quangdangfit/gocommon/validation"
 
@@ -85,8 +86,8 @@ func (s *OrderService) PlaceOrder(ctx context.Context, req *dto.PlaceOrderReq) (
 			productMap[line.ProductID] = product
 		}
 
-		for _, line := range lines {
-			if err := uow.Inventory().ConsumeStock(ctx, line.ProductID, int64(line.Quantity)); err != nil {
+		for _, item := range stockConsumptionPlan(lines) {
+			if err := uow.Inventory().ConsumeStock(ctx, item.productID, item.quantity); err != nil {
 				return err
 			}
 		}
@@ -115,6 +116,33 @@ func (s *OrderService) PlaceOrder(ctx context.Context, req *dto.PlaceOrderReq) (
 	}
 
 	return order, nil
+}
+
+type stockConsumption struct {
+	productID string
+	quantity  int64
+}
+
+func stockConsumptionPlan(lines []*model.OrderLine) []stockConsumption {
+	quantities := make(map[string]int64, len(lines))
+	for _, line := range lines {
+		quantities[line.ProductID] += int64(line.Quantity)
+	}
+
+	productIDs := make([]string, 0, len(quantities))
+	for productID := range quantities {
+		productIDs = append(productIDs, productID)
+	}
+	sort.Strings(productIDs)
+
+	plan := make([]stockConsumption, 0, len(productIDs))
+	for _, productID := range productIDs {
+		plan = append(plan, stockConsumption{
+			productID: productID,
+			quantity:  quantities[productID],
+		})
+	}
+	return plan
 }
 
 type staticUnitOfWork struct {

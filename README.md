@@ -184,7 +184,7 @@ cp pkg/config/config.sample.yaml pkg/config/config.yaml
 Example local config:
 
 ```yaml
-environment: production
+environment: development
 http_port: 8888
 grpc_port: 8889
 auth_secret: local-dev-secret

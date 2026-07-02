@@ -160,3 +160,17 @@ func (suite *ProductRepositoryTestSuite) TestListProductsFindFail() {
 	suite.Nil(product)
 	suite.Nil(pagination)
 }
+
+func (suite *ProductRepositoryTestSuite) TestProductListOrderUsesAllowedColumn() {
+	order := productListOrder("price", true)
+
+	suite.Equal("price", order.Column.Name)
+	suite.True(order.Desc)
+}
+
+func (suite *ProductRepositoryTestSuite) TestProductListOrderRejectsUnsafeColumn() {
+	order := productListOrder("price DESC; DROP TABLE users;--", true)
+
+	suite.Equal("created_at", order.Column.Name)
+	suite.False(order.Desc)
+}

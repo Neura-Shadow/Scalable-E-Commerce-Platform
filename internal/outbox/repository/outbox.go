@@ -43,7 +43,7 @@ func (r *OutboxRepo) ListPendingReady(ctx context.Context, now time.Time, limit 
 		ctx,
 		&events,
 		dbs.WithQuery(dbs.NewQuery("status = ? AND next_attempt_at <= ?", model.OutboxEventStatusPending, now)),
-		dbs.WithOrder("created_at"),
+		dbs.WithOrder(clause.OrderByColumn{Column: clause.Column{Name: "created_at"}}),
 		dbs.WithLimit(limit),
 	)
 	if err != nil {

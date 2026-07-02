@@ -289,6 +289,58 @@ func (suite *OrderServiceTestSuite) TestPlaceOrderSuccessCreatesOutboxEvent() {
 	suite.Equal(2.2, payload.Lines[0].Price)
 }
 
+func (suite *OrderServiceTestSuite) TestPlaceOrderConsumesStockInDeterministicAggregatedOrder() {
+	req := &dto.PlaceOrderReq{
+		UserID: "userID",
+		Lines: []dto.PlaceOrderLineReq{
+			{
+				ProductID: "product-b",
+				Quantity:  2,
+			},
+			{
+				ProductID: "product-a",
+				Quantity:  1,
+			},
+			{
+				ProductID: "product-b",
+				Quantity:  3,
+			},
+		},
+	}
+	var consumed []stockConsumption
+
+	suite.mockProductRepo.On("GetProductByID", mock.Anything, "product-a").
+		Return(&model.Product{ID: "product-a", Price: 1}, nil).Times(1)
+	suite.mockProductRepo.On("GetProductByID", mock.Anything, "product-b").
+		Return(&model.Product{ID: "product-b", Price: 2}, nil).Times(2)
+	suite.mockInventory.On("ConsumeStock", mock.Anything, mock.AnythingOfType("string"), mock.AnythingOfType("int64")).
+		Run(func(args mock.Arguments) {
+			consumed = append(consumed, stockConsumption{
+				productID: args.String(1),
+				quantity:  args.Get(2).(int64),
+			})
+		}).
+		Return(nil).Times(2)
+	suite.mockRepo.On("CreateOrder", mock.Anything, "userID", mock.Anything).
+		Return(&model.Order{
+			UserID: "userID",
+			Lines: []*model.OrderLine{
+				{ProductID: "product-b", Quantity: 2},
+				{ProductID: "product-a", Quantity: 1},
+				{ProductID: "product-b", Quantity: 3},
+			},
+		}, nil).Times(1)
+
+	order, err := suite.service.PlaceOrder(context.Background(), req)
+
+	suite.NoError(err)
+	suite.NotNil(order)
+	suite.Equal([]stockConsumption{
+		{productID: "product-a", quantity: 1},
+		{productID: "product-b", quantity: 5},
+	}, consumed)
+}
+
 func (suite *OrderServiceTestSuite) TestPlaceOrderGetProductByIDFail() {
 	req := &dto.PlaceOrderReq{
 		UserID: "userID",

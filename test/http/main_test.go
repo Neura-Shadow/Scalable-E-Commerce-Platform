@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -46,6 +47,9 @@ func TestMain(m *testing.M) {
 func setup() {
 	cfg := config.LoadConfig()
 	logger.Initialize(config.ProductionEnv)
+	if !strings.Contains(cfg.DatabaseURI, "goshop_test") {
+		logger.Fatal("HTTP integration tests require a dedicated goshop_test database")
+	}
 
 	var err error
 	dbTest, err = dbs.NewDatabase(cfg.DatabaseURI)
@@ -165,5 +169,18 @@ func cleanData(records ...interface{}) {
 		dbTest.Delete(context.Background(), record)
 	}
 
-	testCache.RemovePattern("*")
+	cleanRedisTestData()
+}
+
+func cleanRedisTestData() {
+	for _, pattern := range []string{
+		"/api/v1/products*",
+		"idempotency:orders:*",
+		"rate-limit:orders:*",
+		"processed:events:*",
+		"consumer:failures:*",
+		"stream:orders*",
+	} {
+		testCache.RemovePattern(pattern)
+	}
 }

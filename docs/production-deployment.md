@@ -93,7 +93,7 @@ The HTTP service exposes:
 GET /health
 ```
 
-Use this endpoint for readiness/liveness checks at the platform layer.
+Use this endpoint as a lightweight liveness check only. It intentionally does not prove PostgreSQL, Redis, publisher, or consumer readiness. For production readiness, combine `/health` with a platform-level check that verifies database connectivity, Redis connectivity, migration status, and the Prometheus scrape path.
 
 The metrics endpoint is enabled by default:
 
@@ -178,19 +178,18 @@ The repository includes a Redis Streams consumer foundation, but the built-in ha
 Useful Redis Streams checks:
 
 ```bash
+redis-cli XLEN stream:orders
+redis-cli XRANGE stream:orders - + COUNT 10
+redis-cli XINFO STREAM stream:orders
+redis-cli XINFO GROUPS stream:orders
+redis-cli XINFO CONSUMERS stream:orders order-events
 redis-cli XLEN stream:orders:dead_letter
-redis-cli XRANGE stream:orders:dead_letter - +
+redis-cli XRANGE stream:orders:dead_letter - + COUNT 10
 redis-cli XPENDING stream:orders order-events
 ```
 
-Recommended outbox metrics:
+Application Prometheus metrics:
 
-- `outbox_pending_count`
-- `outbox_published_count`
-- `outbox_publish_failed_count`
-- `outbox_dead_letter_count`
-- `outbox_publish_latency_ms`
-- `outbox_oldest_pending_age_seconds`
 - `outbox_publish_attempt_total`
 - `outbox_publish_success_total`
 - `outbox_publish_failure_total`
@@ -201,10 +200,18 @@ Recommended outbox metrics:
 - `outbox_consumer_duplicate_skipped_total`
 - `outbox_consumer_stale_claim_total`
 - `outbox_consumer_dead_letter_total`
-- Redis stream length and consumer group pending count
-- stale claimed message count
-- duplicate skipped count
-- dead-letter stream length and growth rate
+
+Backlog/current-state signals such as DB pending row count, oldest pending row age, Redis stream length, consumer group pending count, and DLQ length should come from SQL/Redis exporter queries or operational scripts until the application owns a dedicated sampler.
+
+Example PromQL:
+
+```promql
+histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, path))
+histogram_quantile(0.99, sum(rate(order_place_duration_seconds_bucket[5m])) by (le))
+sum(rate(order_place_failed_total[5m])) by (reason)
+sum(rate(outbox_publish_failure_total[5m])) by (event_type, reason)
+increase(outbox_consumer_dead_letter_total[15m])
+```
 
 Recommended dashboard panels:
 

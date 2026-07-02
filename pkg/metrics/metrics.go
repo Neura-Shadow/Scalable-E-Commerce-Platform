@@ -13,6 +13,10 @@ import (
 
 const unknownLabel = "unknown"
 
+var knownEventTypes = map[string]struct{}{
+	"order.created": {},
+}
+
 type registryState struct {
 	registry *prometheus.Registry
 
@@ -219,52 +223,52 @@ func RecordInventoryInsufficientStock() {
 }
 
 func RecordOutboxEventCreated(eventType string) {
-	current().outboxEventsCreated.WithLabelValues(label(eventType)).Inc()
+	current().outboxEventsCreated.WithLabelValues(eventTypeLabel(eventType)).Inc()
 }
 
 func RecordOutboxPublishAttempt(eventType string) {
-	current().outboxPublishAttempt.WithLabelValues(label(eventType)).Inc()
+	current().outboxPublishAttempt.WithLabelValues(eventTypeLabel(eventType)).Inc()
 }
 
 func RecordOutboxPublishSuccess(eventType string, duration time.Duration) {
 	s := current()
-	eventType = label(eventType)
+	eventType = eventTypeLabel(eventType)
 	s.outboxPublishSuccess.WithLabelValues(eventType).Inc()
 	s.outboxPublishLatency.WithLabelValues(eventType, "success").Observe(seconds(duration))
 }
 
 func RecordOutboxPublishFailure(eventType, reason string, duration time.Duration) {
 	s := current()
-	eventType = label(eventType)
+	eventType = eventTypeLabel(eventType)
 	s.outboxPublishFailure.WithLabelValues(eventType, label(reason)).Inc()
 	s.outboxPublishLatency.WithLabelValues(eventType, "failure").Observe(seconds(duration))
 }
 
 func RecordOutboxDeadLetter(eventType, reason string) {
-	current().outboxDeadLetter.WithLabelValues(label(eventType), label(reason)).Inc()
+	current().outboxDeadLetter.WithLabelValues(eventTypeLabel(eventType), label(reason)).Inc()
 }
 
 func RecordOutboxConsumerRead(eventType string, count int) {
 	if count <= 0 {
 		return
 	}
-	current().outboxConsumerRead.WithLabelValues(label(eventType)).Add(float64(count))
+	current().outboxConsumerRead.WithLabelValues(eventTypeLabel(eventType)).Add(float64(count))
 }
 
 func RecordOutboxConsumerHandlerSuccess(eventType string) {
-	current().outboxConsumerHandlerSuccess.WithLabelValues(label(eventType)).Inc()
+	current().outboxConsumerHandlerSuccess.WithLabelValues(eventTypeLabel(eventType)).Inc()
 }
 
 func RecordOutboxConsumerAck(eventType, result string) {
-	current().outboxConsumerAck.WithLabelValues(label(eventType), label(result)).Inc()
+	current().outboxConsumerAck.WithLabelValues(eventTypeLabel(eventType), label(result)).Inc()
 }
 
 func RecordOutboxConsumerFailure(eventType, reason string) {
-	current().outboxConsumerFailure.WithLabelValues(label(eventType), label(reason)).Inc()
+	current().outboxConsumerFailure.WithLabelValues(eventTypeLabel(eventType), label(reason)).Inc()
 }
 
 func RecordOutboxConsumerDuplicateSkipped(eventType string) {
-	current().outboxConsumerDuplicateSkipped.WithLabelValues(label(eventType)).Inc()
+	current().outboxConsumerDuplicateSkipped.WithLabelValues(eventTypeLabel(eventType)).Inc()
 }
 
 func RecordOutboxConsumerStaleClaim(count int) {
@@ -275,7 +279,7 @@ func RecordOutboxConsumerStaleClaim(count int) {
 }
 
 func RecordOutboxConsumerDeadLetter(eventType, reason, result string) {
-	current().outboxConsumerDeadLetter.WithLabelValues(label(eventType), label(reason), label(result)).Inc()
+	current().outboxConsumerDeadLetter.WithLabelValues(eventTypeLabel(eventType), label(reason), label(result)).Inc()
 }
 
 func current() *registryState {
@@ -286,6 +290,14 @@ func current() *registryState {
 
 func label(value string) string {
 	if value == "" {
+		return unknownLabel
+	}
+	return value
+}
+
+func eventTypeLabel(value string) string {
+	value = label(value)
+	if _, ok := knownEventTypes[value]; !ok {
 		return unknownLabel
 	}
 	return value

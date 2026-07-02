@@ -1,6 +1,7 @@
 package jtoken
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ const (
 	RefreshTokenExpiredTime = 30 * 24 * 3600
 	AccessTokenType         = "x-access"  // 5 minutes
 	RefreshTokenType        = "x-refresh" // 30 days
+	bearerPrefix            = "Bearer "
 )
 
 func GenerateAccessToken(payload map[string]interface{}) string {
@@ -54,9 +56,14 @@ func GenerateRefreshToken(payload map[string]interface{}) string {
 
 func ValidateToken(jwtToken string) (map[string]interface{}, error) {
 	cfg := config.GetConfig()
-	cleanJWT := strings.Replace(jwtToken, "Bearer ", "", -1)
+	cleanJWT := strings.TrimSpace(jwtToken)
+	cleanJWT = strings.TrimPrefix(cleanJWT, bearerPrefix)
 	tokenData := jwt.MapClaims{}
-	token, err := jwt.ParseWithClaims(cleanJWT, tokenData, func(token *jwt.Token) (interface{}, error) {
+	parser := jwt.Parser{ValidMethods: []string{jwt.SigningMethodHS256.Alg()}}
+	token, err := parser.ParseWithClaims(cleanJWT, tokenData, func(token *jwt.Token) (interface{}, error) {
+		if token.Method != jwt.SigningMethodHS256 {
+			return nil, fmt.Errorf("unexpected jwt signing method %q", token.Header["alg"])
+		}
 		return []byte(cfg.AuthSecret), nil
 	})
 

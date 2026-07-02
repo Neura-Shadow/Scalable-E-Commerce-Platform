@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -510,23 +509,29 @@ func TestOrderAPI_ConcurrentOrdersNeverOversell(t *testing.T) {
 	token := tokenForUser(&u)
 
 	var wg sync.WaitGroup
-	var successCount int64
+	statusCodes := make(chan int, 10)
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			writer := makeRequest("POST", "/api/v1/orders", req, token)
-			if writer.Code == http.StatusOK {
-				atomic.AddInt64(&successCount, 1)
-			}
+			statusCodes <- writer.Code
 		}()
 	}
 	wg.Wait()
+	close(statusCodes)
+
+	statusCounts := map[int]int{}
+	for code := range statusCodes {
+		statusCounts[code]++
+	}
 
 	var inventory inventoryModel.Inventory
 	err := dbTest.GetDB().Where("product_id = ?", p.ID).First(&inventory).Error
 	assert.NoError(t, err)
-	assert.Equal(t, int64(3), successCount)
+	assert.Equal(t, 3, statusCounts[http.StatusOK])
+	assert.Equal(t, 7, statusCounts[http.StatusConflict])
+	assert.Zero(t, statusCounts[http.StatusInternalServerError])
 	assert.Equal(t, int64(0), inventory.Quantity)
 	assert.GreaterOrEqual(t, inventory.Quantity, int64(0))
 

@@ -256,8 +256,13 @@ Dead-lettered events should be visible in logs and dashboards. Operators should 
 Useful Redis checks:
 
 ```bash
+redis-cli XLEN stream:orders
+redis-cli XRANGE stream:orders - + COUNT 10
+redis-cli XINFO STREAM stream:orders
+redis-cli XINFO GROUPS stream:orders
+redis-cli XINFO CONSUMERS stream:orders order-events
 redis-cli XLEN stream:orders:dead_letter
-redis-cli XRANGE stream:orders:dead_letter - +
+redis-cli XRANGE stream:orders:dead_letter - + COUNT 10
 redis-cli XPENDING stream:orders order-events
 ```
 
@@ -267,12 +272,6 @@ Alert on sustained dead-letter stream growth, old pending entries, and unexpecte
 
 Recommended metrics and logs:
 
-- `outbox_pending_count`
-- `outbox_published_count`
-- `outbox_publish_failed_count`
-- `outbox_dead_letter_count`
-- `outbox_publish_latency_ms`
-- `outbox_oldest_pending_age_seconds`
 - `outbox_events_created_total`
 - `outbox_publish_attempt_total`
 - `outbox_publish_success_total`
@@ -282,16 +281,15 @@ Recommended metrics and logs:
 - `outbox_consumer_read_total`
 - `outbox_consumer_ack_total`
 - `outbox_consumer_failure_total`
-- `outbox_consumer_duplicate_skipped_count`
 - `outbox_consumer_duplicate_skipped_total`
 - `outbox_consumer_stale_claim_total`
-- `outbox_consumer_dead_letter_count`
 - `outbox_consumer_dead_letter_total`
-- Redis consumer group pending count
+
+Use SQL/Redis exporter queries or operational scripts for current-state gauges that the app does not emit yet, such as DB pending count, oldest pending age, Redis consumer group pending count, and DLQ stream length.
 
 Current logs include batch completion counts, publish failures, consumer failures, dead-letter counts, duplicate skip counts, event type, event ID, and aggregate ID. Payloads are intentionally not logged by default.
 
-Prometheus labels for outbox and consumer metrics are bounded to `event_type`, `result`, and `reason`. Do not add event IDs, aggregate IDs, order IDs, raw Redis keys, or payload values as metric labels.
+Prometheus labels for outbox and consumer metrics are bounded to `event_type`, `result`, and `reason`. Unknown event types are collapsed to `unknown` to avoid high-cardinality label growth. Do not add event IDs, aggregate IDs, order IDs, raw Redis keys, or payload values as metric labels.
 
 ## Migration note
 

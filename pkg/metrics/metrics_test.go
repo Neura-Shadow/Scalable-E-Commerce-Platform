@@ -32,3 +32,15 @@ func TestMetricLabelNamesStayBounded(t *testing.T) {
 		assert.NotContains(t, snapshot, label)
 	}
 }
+
+func TestUnknownEventTypeLabelsCollapseToUnknown(t *testing.T) {
+	ResetForTest()
+
+	RecordOutboxConsumerFailure("order.created.user-123", "handler_error")
+
+	snapshot, err := SnapshotText()
+
+	require.NoError(t, err)
+	assert.Contains(t, snapshot, `event_type="unknown"`)
+	assert.NotContains(t, snapshot, "order.created.user-123")
+}

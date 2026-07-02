@@ -137,6 +137,18 @@ At minimum, record:
 
 The final stock quantity must never be negative.
 
+Example latency and error queries:
+
+```promql
+histogram_quantile(0.95, sum(rate(order_place_duration_seconds_bucket[5m])) by (le))
+histogram_quantile(0.99, sum(rate(order_place_duration_seconds_bucket[5m])) by (le))
+histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, path))
+sum(rate(order_place_failed_total[5m])) by (reason)
+sum(rate(order_rate_limited_total[5m])) by (reason)
+```
+
+A starting load-test gate is zero 5xx responses, zero negative stock observations, exactly the expected successful order count for the seeded stock, and no sustained p99 regression against the previous accepted run.
+
 ## Optional outbox publisher check
 
 When Redis Streams publishing is enabled during a load run, successful orders should eventually create entries in the configured stream and mark their outbox rows as `published`. When the consumer foundation is also enabled, messages should be read with `XREADGROUP`, skipped if `processed:events:{eventID}` already exists, and acknowledged with `XACK` after the metadata-only handler succeeds. Repeated handler failures are counted with `consumer:failures:{stream}:{group}:{eventID}`, expire after `outbox_consumer_failure_ttl_seconds`, and route to `stream:orders:dead_letter` after the configured max attempts. Invalid messages are dead-lettered instead of being retried forever. Originals are acknowledged only after the dead-letter write succeeds.
@@ -145,11 +157,13 @@ Useful checks:
 
 ```bash
 redis-cli XLEN stream:orders
-redis-cli XRANGE stream:orders - +
+redis-cli XRANGE stream:orders - + COUNT 10
+redis-cli XINFO STREAM stream:orders
 redis-cli XINFO GROUPS stream:orders
+redis-cli XINFO CONSUMERS stream:orders order-events
 redis-cli XPENDING stream:orders order-events
 redis-cli XLEN stream:orders:dead_letter
-redis-cli XRANGE stream:orders:dead_letter - +
+redis-cli XRANGE stream:orders:dead_letter - + COUNT 10
 curl -s http://localhost:8888/metrics
 ```
 
