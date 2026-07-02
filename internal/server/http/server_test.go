@@ -189,6 +189,9 @@ func withOutboxConsumerConfig(
 	previousProcessedTTLSeconds := cfg.OutboxConsumerProcessedTTLSeconds
 	previousClaimMinIdleSeconds := cfg.OutboxConsumerClaimMinIdleSeconds
 	previousClaimBatchSize := cfg.OutboxConsumerClaimBatchSize
+	previousMaxDeliveryAttempts := cfg.OutboxConsumerMaxDeliveryAttempts
+	previousFailureTTLSeconds := cfg.OutboxConsumerFailureTTLSeconds
+	previousDeadLetterStreamName := cfg.OutboxDeadLetterStreamName
 
 	cfg.OutboxRedisStreamName = streamName
 	cfg.OutboxConsumerEnabled = enabled
@@ -199,6 +202,9 @@ func withOutboxConsumerConfig(
 	cfg.OutboxConsumerProcessedTTLSeconds = processedTTLSeconds
 	cfg.OutboxConsumerClaimMinIdleSeconds = claimMinIdleSeconds
 	cfg.OutboxConsumerClaimBatchSize = claimBatchSize
+	cfg.OutboxConsumerMaxDeliveryAttempts = 5
+	cfg.OutboxConsumerFailureTTLSeconds = 86400
+	cfg.OutboxDeadLetterStreamName = "stream:orders:dead_letter"
 
 	t.Cleanup(func() {
 		cfg.OutboxRedisStreamName = previousPublisherStreamName
@@ -210,5 +216,8 @@ func withOutboxConsumerConfig(
 		cfg.OutboxConsumerProcessedTTLSeconds = previousProcessedTTLSeconds
 		cfg.OutboxConsumerClaimMinIdleSeconds = previousClaimMinIdleSeconds
 		cfg.OutboxConsumerClaimBatchSize = previousClaimBatchSize
+		cfg.OutboxConsumerMaxDeliveryAttempts = previousMaxDeliveryAttempts
+		cfg.OutboxConsumerFailureTTLSeconds = previousFailureTTLSeconds
+		cfg.OutboxDeadLetterStreamName = previousDeadLetterStreamName
 	})
 }

@@ -208,6 +208,9 @@ func (s Server) newOutboxConsumer() *outboxConsumer.RedisConsumer {
 		outboxConsumer.WithBlock(config.OutboxConsumerBlock()),
 		outboxConsumer.WithClaimMinIdle(config.OutboxConsumerClaimMinIdle()),
 		outboxConsumer.WithClaimBatchSize(int64(config.OutboxConsumerClaimBatchSize())),
+		outboxConsumer.WithMaxDeliveryAttempts(int64(config.OutboxConsumerMaxDeliveryAttempts())),
+		outboxConsumer.WithFailureTTL(config.OutboxConsumerFailureTTL()),
+		outboxConsumer.WithDeadLetterStreamName(config.OutboxDeadLetterStreamName()),
 	)
 }
 
@@ -241,6 +244,7 @@ func (s Server) startOutboxConsumer() (context.CancelFunc, error) {
 					" skipped=", result.Skipped,
 					" failed=", result.Failed,
 					" invalid=", result.Invalid,
+					" dead_lettered=", result.DeadLettered,
 					" acked=", result.Acked,
 				)
 			}
@@ -255,6 +259,7 @@ func (s Server) startOutboxConsumer() (context.CancelFunc, error) {
 					" skipped=", claimResult.Skipped,
 					" failed=", claimResult.Failed,
 					" invalid=", claimResult.Invalid,
+					" dead_lettered=", claimResult.DeadLettered,
 					" acked=", claimResult.Acked,
 				)
 			}

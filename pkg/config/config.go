@@ -40,6 +40,9 @@ const (
 	DefaultOutboxConsumerProcessedTTLSeconds = 24 * 60 * 60
 	DefaultOutboxConsumerClaimMinIdleSeconds = 60
 	DefaultOutboxConsumerClaimBatchSize      = 10
+	DefaultOutboxConsumerMaxDeliveryAttempts = 5
+	DefaultOutboxConsumerFailureTTLSeconds   = 24 * 60 * 60
+	DefaultOutboxDeadLetterStreamName        = "stream:orders:dead_letter"
 )
 
 var AuthIgnoreMethods = []string{
@@ -84,6 +87,9 @@ type Schema struct {
 	OutboxConsumerProcessedTTLSeconds int    `env:"outbox_consumer_processed_ttl_seconds"`
 	OutboxConsumerClaimMinIdleSeconds int    `env:"outbox_consumer_claim_min_idle_seconds"`
 	OutboxConsumerClaimBatchSize      int    `env:"outbox_consumer_claim_batch_size"`
+	OutboxConsumerMaxDeliveryAttempts int    `env:"outbox_consumer_max_delivery_attempts"`
+	OutboxConsumerFailureTTLSeconds   int    `env:"outbox_consumer_failure_ttl_seconds"`
+	OutboxDeadLetterStreamName        string `env:"outbox_dead_letter_stream_name"`
 }
 
 var (
@@ -237,6 +243,24 @@ func OutboxConsumerClaimBatchSize() int {
 		return DefaultOutboxConsumerClaimBatchSize
 	}
 	return cfg.OutboxConsumerClaimBatchSize
+}
+
+func OutboxConsumerMaxDeliveryAttempts() int {
+	if cfg.OutboxConsumerMaxDeliveryAttempts <= 0 {
+		return DefaultOutboxConsumerMaxDeliveryAttempts
+	}
+	return cfg.OutboxConsumerMaxDeliveryAttempts
+}
+
+func OutboxConsumerFailureTTL() time.Duration {
+	return secondsOrDefault(cfg.OutboxConsumerFailureTTLSeconds, DefaultOutboxConsumerFailureTTLSeconds)
+}
+
+func OutboxDeadLetterStreamName() string {
+	if cfg.OutboxDeadLetterStreamName == "" {
+		return DefaultOutboxDeadLetterStreamName
+	}
+	return cfg.OutboxDeadLetterStreamName
 }
 
 func secondsOrDefault(value, defaultValue int) time.Duration {

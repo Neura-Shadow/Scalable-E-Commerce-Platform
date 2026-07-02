@@ -55,6 +55,9 @@ outbox_consumer_block_seconds
 outbox_consumer_processed_ttl_seconds
 outbox_consumer_claim_min_idle_seconds
 outbox_consumer_claim_batch_size
+outbox_consumer_max_delivery_attempts
+outbox_consumer_failure_ttl_seconds
+outbox_dead_letter_stream_name
 ```
 
 ## Build
@@ -111,7 +114,7 @@ Current behavior:
 - pending batch fetches use `FOR UPDATE SKIP LOCKED`
 - the no-op/log publisher logs event metadata only and does not log payloads
 - the Redis Streams publisher writes event metadata and JSON payloads to `outbox_redis_stream_name`
-- the Redis Streams consumer foundation reads with `XREADGROUP`, uses processed-event keys by `event_id`, acknowledges success with `XACK`, and claims stale pending entries with `XAUTOCLAIM`
+- the Redis Streams consumer foundation reads with `XREADGROUP`, uses processed-event keys by `event_id`, acknowledges success with `XACK`, claims stale pending entries with `XAUTOCLAIM`, tracks handler failures with `consumer:failures:{stream}:{group}:{eventID}`, and writes poison messages to `outbox_dead_letter_stream_name`
 
 Enable Redis Streams publishing with:
 
@@ -132,6 +135,9 @@ outbox_consumer_block_seconds: 5
 outbox_consumer_processed_ttl_seconds: 86400
 outbox_consumer_claim_min_idle_seconds: 60
 outbox_consumer_claim_batch_size: 10
+outbox_consumer_max_delivery_attempts: 5
+outbox_consumer_failure_ttl_seconds: 86400
+outbox_dead_letter_stream_name: stream:orders:dead_letter
 ```
 
 Operational expectations for the publisher:
@@ -142,7 +148,15 @@ Operational expectations for the publisher:
 - move exhausted events to `dead_letter`
 - alert on dead-letter growth
 
-The repository includes a minimal Redis Streams consumer foundation, but the built-in handler only logs metadata and performs no real business side effects. Future handlers should process messages idempotently by `event_id`, inspect pending entries with `XPENDING`, claim stale pending entries with `XAUTOCLAIM`, acknowledge only after successful side effects, and move poison messages to `stream:orders:dead_letter` after bounded retries.
+The repository includes a Redis Streams consumer foundation, but the built-in handler only logs metadata and performs no real business side effects. Future handlers should process messages idempotently by `event_id`, inspect pending entries with `XPENDING`, claim stale pending entries with `XAUTOCLAIM`, and acknowledge only after successful side effects. If handling fails repeatedly, the current consumer moves the message to `stream:orders:dead_letter` after bounded retries and acknowledges the original only after the dead-letter write succeeds. Failure counters expire after `outbox_consumer_failure_ttl_seconds`. Invalid messages are dead-lettered instead of retried forever. Duplicate processed events are acknowledged without counting as failures.
+
+Useful Redis Streams checks:
+
+```bash
+redis-cli XLEN stream:orders:dead_letter
+redis-cli XRANGE stream:orders:dead_letter - +
+redis-cli XPENDING stream:orders order-events
+```
 
 Recommended outbox metrics:
 
@@ -155,6 +169,7 @@ Recommended outbox metrics:
 - Redis stream length and consumer group pending count
 - stale claimed message count
 - duplicate skipped count
+- dead-letter stream length and growth rate
 
 ## Security checklist
 
@@ -178,5 +193,6 @@ Recommended outbox metrics:
 7. Verify that successful order placement creates one pending `order.created` outbox row.
 8. If Redis Streams publishing is enabled, verify that `stream:orders` receives an entry and the outbox row is marked `published`.
 9. If Redis Streams consuming is enabled, verify that group `order-events` exists and messages are acknowledged after the log/no-op handler succeeds.
-10. Monitor order failure logs, rate-limited counts, outbox dead-letter counts, stream length, pending entries, stale claims, duplicate skips, and latency.
-11. Roll back if error rate, outbox failures, consumer failures, or latency exceed the deployment threshold.
+10. Verify `XLEN stream:orders:dead_letter`, `XRANGE stream:orders:dead_letter - +`, and `XPENDING stream:orders order-events` during rollout.
+11. Monitor order failure logs, rate-limited counts, outbox dead-letter counts, stream length, pending entries, stale claims, duplicate skips, and latency.
+12. Roll back if error rate, outbox failures, consumer failures, dead-letter growth, or latency exceed the deployment threshold.

@@ -36,3 +36,6 @@ outbox_consumer_block_seconds: 5
 outbox_consumer_processed_ttl_seconds: 86400
 outbox_consumer_claim_min_idle_seconds: 60
 outbox_consumer_claim_batch_size: 10
+outbox_consumer_max_delivery_attempts: 5
+outbox_consumer_failure_ttl_seconds: 86400
+outbox_dead_letter_stream_name: stream:orders:dead_letter

@@ -35,7 +35,7 @@ HTTP handler -> order service -> repository/inventory/product ports -> GORM/Redi
 - Redis-backed order-placement rate limiting.
 - Transactional outbox foundation for `order.created` events.
 - Optional log or Redis Streams outbox publisher worker with retry and dead-letter bookkeeping.
-- Optional Redis Streams consumer group foundation with idempotent event processing.
+- Optional Redis Streams consumer group foundation with idempotent event processing, bounded failure tracking, and poison-message dead-letter handling.
 - HTTP server hardening with explicit timeouts, max header size, body size limits, trusted proxy lockdown, and graceful shutdown.
 - Swagger API documentation.
 - Docker Compose for PostgreSQL and Redis.
@@ -106,7 +106,7 @@ outbox_redis_stream_name: stream:orders
 
 The Redis Streams publisher writes `event_id`, `aggregate_type`, `aggregate_id`, `event_type`, `payload`, and `created_at` with `XADD`. Real downstream business side-effect handlers are not implemented yet; see `docs/order-outbox-pattern.md` for the consumer group foundation and future handler design.
 
-The Redis Streams consumer foundation is also disabled by default. It can create/read from consumer group `order-events`, skip duplicate `event_id` values with Redis processed-event keys, acknowledge successful messages with `XACK`, and claim stale pending messages with `XAUTOCLAIM`. The included handler only logs metadata and performs no payment, email, fulfillment, or analytics side effects yet.
+The Redis Streams consumer foundation is also disabled by default. It can create/read from consumer group `order-events`, skip duplicate `event_id` values with Redis processed-event keys, acknowledge successful messages with `XACK`, and claim stale pending messages with `XAUTOCLAIM`. Repeated handler failures are tracked with `consumer:failures:{stream}:{group}:{eventID}` keys, default to 5 delivery attempts with a 24 hour failure TTL, and move poison messages to `stream:orders:dead_letter` before acknowledging the original stream entry. Invalid messages are dead-lettered instead of being retried forever. Duplicate processed events are acknowledged without incrementing failure counters or writing to the dead-letter stream. The included handler only logs metadata and performs no payment, email, fulfillment, or analytics side effects yet.
 
 ```yaml
 outbox_consumer_enabled: true
@@ -117,7 +117,20 @@ outbox_consumer_block_seconds: 5
 outbox_consumer_processed_ttl_seconds: 86400
 outbox_consumer_claim_min_idle_seconds: 60
 outbox_consumer_claim_batch_size: 10
+outbox_consumer_max_delivery_attempts: 5
+outbox_consumer_failure_ttl_seconds: 86400
+outbox_dead_letter_stream_name: stream:orders:dead_letter
 ```
+
+The consumer writes dead-letter entries with the original stream/group/message ID, event metadata, JSON payload, failure count, error type, and `dead_lettered_at`. It calls `XACK` only after the dead-letter `XADD` succeeds. Useful operational checks:
+
+```bash
+redis-cli XLEN stream:orders:dead_letter
+redis-cli XRANGE stream:orders:dead_letter - +
+redis-cli XPENDING stream:orders order-events
+```
+
+Monitor duplicate skip counts from consumer batch logs and alert on sustained dead-letter stream growth.
 
 ## Permission Model
 

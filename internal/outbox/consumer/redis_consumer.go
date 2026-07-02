@@ -13,32 +13,39 @@ import (
 )
 
 const (
-	DefaultStreamName       = "stream:orders"
-	DefaultGroupName        = "order-events"
-	DefaultConsumerName     = "local-consumer-1"
-	DefaultBatchSize        = int64(10)
-	DefaultBlockDuration    = 5 * time.Second
-	DefaultClaimMinIdle     = time.Minute
-	DefaultClaimBatchSize   = int64(10)
-	DefaultClaimStartID     = "0-0"
-	consumerGroupStartID    = "0"
-	redisBusyGroupErrMarker = "BUSYGROUP"
+	DefaultStreamName           = "stream:orders"
+	DefaultGroupName            = "order-events"
+	DefaultConsumerName         = "local-consumer-1"
+	DefaultBatchSize            = int64(10)
+	DefaultBlockDuration        = 5 * time.Second
+	DefaultClaimMinIdle         = time.Minute
+	DefaultClaimBatchSize       = int64(10)
+	DefaultClaimStartID         = "0-0"
+	DefaultMaxDeliveryAttempts  = int64(5)
+	DefaultFailureTTL           = 24 * time.Hour
+	DefaultDeadLetterStreamName = "stream:orders:dead_letter"
+	consumerGroupStartID        = "0"
+	redisBusyGroupErrMarker     = "BUSYGROUP"
 )
 
 var ErrInvalidPayload = errors.New("stream event payload must be valid JSON")
 
 type RedisConsumer struct {
-	cache          redis.IRedis
-	handler        EventHandler
-	processedStore ProcessedEventStore
-	streamName     string
-	groupName      string
-	consumerName   string
-	batchSize      int64
-	block          time.Duration
-	claimMinIdle   time.Duration
-	claimBatchSize int64
-	claimStartID   string
+	cache                redis.IRedis
+	handler              EventHandler
+	processedStore       ProcessedEventStore
+	streamName           string
+	groupName            string
+	consumerName         string
+	batchSize            int64
+	block                time.Duration
+	claimMinIdle         time.Duration
+	claimBatchSize       int64
+	claimStartID         string
+	maxDeliveryAttempts  int64
+	failureTTL           time.Duration
+	deadLetterStreamName string
+	now                  func() time.Time
 }
 
 type RedisConsumerOption func(*RedisConsumer)
@@ -50,6 +57,7 @@ type BatchResult struct {
 	Failed         int
 	Invalid        int
 	Acked          int
+	DeadLettered   int
 	NextClaimStart string
 }
 
@@ -109,19 +117,55 @@ func WithClaimBatchSize(batchSize int64) RedisConsumerOption {
 	}
 }
 
+func WithMaxDeliveryAttempts(maxAttempts int64) RedisConsumerOption {
+	return func(c *RedisConsumer) {
+		if maxAttempts > 0 {
+			c.maxDeliveryAttempts = maxAttempts
+		}
+	}
+}
+
+func WithFailureTTL(ttl time.Duration) RedisConsumerOption {
+	return func(c *RedisConsumer) {
+		if ttl > 0 {
+			c.failureTTL = ttl
+		}
+	}
+}
+
+func WithDeadLetterStreamName(streamName string) RedisConsumerOption {
+	return func(c *RedisConsumer) {
+		if streamName != "" {
+			c.deadLetterStreamName = streamName
+		}
+	}
+}
+
+func WithNow(now func() time.Time) RedisConsumerOption {
+	return func(c *RedisConsumer) {
+		if now != nil {
+			c.now = now
+		}
+	}
+}
+
 func NewRedisConsumer(cache redis.IRedis, handler EventHandler, processedStore ProcessedEventStore, opts ...RedisConsumerOption) *RedisConsumer {
 	consumer := &RedisConsumer{
-		cache:          cache,
-		handler:        handler,
-		processedStore: processedStore,
-		streamName:     DefaultStreamName,
-		groupName:      DefaultGroupName,
-		consumerName:   DefaultConsumerName,
-		batchSize:      DefaultBatchSize,
-		block:          DefaultBlockDuration,
-		claimMinIdle:   DefaultClaimMinIdle,
-		claimBatchSize: DefaultClaimBatchSize,
-		claimStartID:   DefaultClaimStartID,
+		cache:                cache,
+		handler:              handler,
+		processedStore:       processedStore,
+		streamName:           DefaultStreamName,
+		groupName:            DefaultGroupName,
+		consumerName:         DefaultConsumerName,
+		batchSize:            DefaultBatchSize,
+		block:                DefaultBlockDuration,
+		claimMinIdle:         DefaultClaimMinIdle,
+		claimBatchSize:       DefaultClaimBatchSize,
+		claimStartID:         DefaultClaimStartID,
+		maxDeliveryAttempts:  DefaultMaxDeliveryAttempts,
+		failureTTL:           DefaultFailureTTL,
+		deadLetterStreamName: DefaultDeadLetterStreamName,
+		now:                  time.Now,
 	}
 	for _, opt := range opts {
 		opt(consumer)
@@ -199,6 +243,16 @@ func (c *RedisConsumer) processMessages(ctx context.Context, messages []redis.Re
 		if err != nil {
 			result.Invalid++
 			result.Failed++
+			if deadLetterErr := c.deadLetterInvalidMessage(ctx, message, err); deadLetterErr != nil {
+				logger.Error("outbox_consumer_dead_letter_invalid_failed stream_message_id="+message.ID, deadLetterErr)
+				continue
+			}
+			result.DeadLettered++
+			if err := c.ackMessageID(ctx, message.ID); err != nil {
+				logger.Error("outbox_consumer_ack_invalid_dead_letter_failed stream_message_id="+message.ID, err)
+				continue
+			}
+			result.Acked++
 			logger.Error("outbox_consumer_invalid_message stream_message_id="+message.ID, err)
 			continue
 		}
@@ -223,6 +277,24 @@ func (c *RedisConsumer) processMessages(ctx context.Context, messages []redis.Re
 
 		if err := c.handler.Handle(ctx, event); err != nil {
 			result.Failed++
+			failureCount, recordErr := c.recordFailure(ctx, event)
+			if recordErr != nil {
+				logger.Error("outbox_consumer_failure_counter_failed event_id="+event.EventID+" stream_message_id="+event.MessageID, recordErr)
+				continue
+			}
+			if failureCount >= c.maxDeliveryAttempts {
+				if deadLetterErr := c.deadLetterEvent(ctx, event, failureCount, "handler_error", err); deadLetterErr != nil {
+					logger.Error("outbox_consumer_dead_letter_failed event_id="+event.EventID+" stream_message_id="+event.MessageID, deadLetterErr)
+					continue
+				}
+				result.DeadLettered++
+				if err := c.ack(ctx, event); err != nil {
+					logger.Error("outbox_consumer_ack_dead_letter_failed event_id="+event.EventID+" stream_message_id="+event.MessageID, err)
+					continue
+				}
+				result.Acked++
+				continue
+			}
 			logger.Error("outbox_consumer_handle_failed event_id="+event.EventID+" event_type="+event.EventType+" aggregate_id="+event.AggregateID, err)
 			continue
 		}
@@ -255,7 +327,64 @@ func (c *RedisConsumer) processMessages(ctx context.Context, messages []redis.Re
 }
 
 func (c *RedisConsumer) ack(ctx context.Context, event StreamEvent) error {
-	return c.cache.XAck(ctx, c.streamName, c.groupName, event.MessageID)
+	return c.ackMessageID(ctx, event.MessageID)
+}
+
+func (c *RedisConsumer) ackMessageID(ctx context.Context, messageID string) error {
+	return c.cache.XAck(ctx, c.streamName, c.groupName, messageID)
+}
+
+func (c *RedisConsumer) recordFailure(ctx context.Context, event StreamEvent) (int64, error) {
+	return c.cache.IncrementWithExpiration(c.failureKey(event.EventID), c.failureTTL)
+}
+
+func (c *RedisConsumer) failureKey(eventID string) string {
+	if eventID == "" {
+		eventID = "unknown"
+	}
+	return fmt.Sprintf("consumer:failures:%s:%s:%s", c.streamName, c.groupName, eventID)
+}
+
+func (c *RedisConsumer) deadLetterEvent(ctx context.Context, event StreamEvent, failureCount int64, errorType string, _ error) error {
+	values := map[string]interface{}{
+		"original_stream":     c.streamName,
+		"original_group":      c.groupName,
+		"original_message_id": event.MessageID,
+		"event_id":            event.EventID,
+		"event_type":          event.EventType,
+		"aggregate_type":      event.AggregateType,
+		"aggregate_id":        event.AggregateID,
+		"payload":             string(event.Payload),
+		"failure_count":       failureCount,
+		"error_type":          errorType,
+		"dead_lettered_at":    c.now().UTC().Format(time.RFC3339Nano),
+	}
+
+	_, err := c.cache.XAdd(ctx, c.deadLetterStreamName, values)
+	return err
+}
+
+func (c *RedisConsumer) deadLetterInvalidMessage(ctx context.Context, message redis.RedisStreamMessage, _ error) error {
+	eventID := optionalString(message.Values, "event_id")
+	if eventID == "" {
+		eventID = message.ID
+	}
+	values := map[string]interface{}{
+		"original_stream":     c.streamName,
+		"original_group":      c.groupName,
+		"original_message_id": message.ID,
+		"event_id":            eventID,
+		"event_type":          optionalString(message.Values, "event_type"),
+		"aggregate_type":      optionalString(message.Values, "aggregate_type"),
+		"aggregate_id":        optionalString(message.Values, "aggregate_id"),
+		"payload":             optionalString(message.Values, "payload"),
+		"failure_count":       int64(1),
+		"error_type":          "parse_error",
+		"dead_lettered_at":    c.now().UTC().Format(time.RFC3339Nano),
+	}
+
+	_, err := c.cache.XAdd(ctx, c.deadLetterStreamName, values)
+	return err
 }
 
 func requiredString(values map[string]interface{}, key string) (string, error) {
@@ -280,5 +409,31 @@ func requiredString(values map[string]interface{}, key string) (string, error) {
 			return "", fmt.Errorf("stream event field %q is required", key)
 		}
 		return text, nil
+	}
+}
+
+func optionalString(values map[string]interface{}, key string) string {
+	if values == nil {
+		return ""
+	}
+	value, ok := values[key]
+	if !ok {
+		return ""
+	}
+	text, err := streamFieldValueToString(value)
+	if err != nil {
+		return ""
+	}
+	return text
+}
+
+func streamFieldValueToString(value interface{}) (string, error) {
+	switch v := value.(type) {
+	case string:
+		return v, nil
+	case []byte:
+		return string(v), nil
+	default:
+		return fmt.Sprint(v), nil
 	}
 }

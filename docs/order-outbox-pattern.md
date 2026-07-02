@@ -23,6 +23,7 @@ Implemented now:
 - `internal/outbox/consumer.RedisConsumer`
 - Redis Streams consumer group reads with `XREADGROUP`, success acknowledgements with `XACK`, and stale pending recovery with `XAUTOCLAIM`
 - Redis-backed processed-event keys for consumed-event idempotency
+- bounded Redis Streams consumer failure counters and dead-letter stream movement
 - `order.created` event creation inside the existing order Unit of Work transaction
 - retry bookkeeping with `attempts`, `next_attempt_at`, and `dead_letter`
 - locked pending-event batch fetching with `FOR UPDATE SKIP LOCKED`
@@ -30,7 +31,6 @@ Implemented now:
 Not implemented yet:
 
 - real downstream payment, email, fulfillment, or analytics handlers
-- poison-message dead-letter stream movement
 - always-on publisher startup by default
 
 ## Candidate future order events
@@ -126,6 +126,9 @@ outbox_consumer_block_seconds = 5
 outbox_consumer_processed_ttl_seconds = 86400
 outbox_consumer_claim_min_idle_seconds = 60
 outbox_consumer_claim_batch_size = 10
+outbox_consumer_max_delivery_attempts = 5
+outbox_consumer_failure_ttl_seconds = 86400
+outbox_dead_letter_stream_name = stream:orders:dead_letter
 ```
 
 Supported publisher types are `log` and `redis_stream`. The current default publisher is `log`, which records event metadata such as event type and aggregate ID, and does not log full payloads.
@@ -162,6 +165,9 @@ outbox_consumer_block_seconds: 5
 outbox_consumer_processed_ttl_seconds: 86400
 outbox_consumer_claim_min_idle_seconds: 60
 outbox_consumer_claim_batch_size: 10
+outbox_consumer_max_delivery_attempts: 5
+outbox_consumer_failure_ttl_seconds: 86400
+outbox_dead_letter_stream_name: stream:orders:dead_letter
 ```
 
 The worker:
@@ -185,7 +191,10 @@ The current consumer foundation:
 - dispatches to an `EventHandler`
 - marks the event processed after successful handling
 - acknowledges successful or already-processed messages with `XACK`
-- leaves failed or invalid messages unacknowledged
+- increments `consumer:failures:{stream}:{group}:{eventID}` on handler failures
+- leaves failed messages unacknowledged while the failure count is below `outbox_consumer_max_delivery_attempts`
+- writes poison messages and invalid messages to `stream:orders:dead_letter`
+- acknowledges dead-lettered originals with `XACK` only after the dead-letter `XADD` succeeds
 - claims stale pending messages with `XAUTOCLAIM`
 - logs metadata only and does not log payload contents
 
@@ -203,14 +212,31 @@ The foundation checks the key before handling and sets it after the current hand
 
 ## Pending recovery and dead-letter strategy
 
-The current pending recovery path uses `XAUTOCLAIM` for messages older than `outbox_consumer_claim_min_idle_seconds`, processes them through the same handler, and acknowledges only on success.
+The current pending recovery path uses `XAUTOCLAIM` for messages older than `outbox_consumer_claim_min_idle_seconds`, processes them through the same handler, and applies the same failure counter and dead-letter rules as new messages.
 
-Future poison-message handling should use:
+Failure counters use this Redis key pattern:
 
-- pending inspection with `XPENDING`
-- bounded delivery attempts stored outside the stream or in message metadata
-- dead-letter stream: `stream:orders:dead_letter`
-- no `XACK` until the original message is either successfully handled or durably copied to the dead-letter stream
+```text
+consumer:failures:{stream}:{group}:{eventID}
+```
+
+If the event ID cannot be parsed, the stream message ID is used in dead-letter metadata. Handler failures below `outbox_consumer_max_delivery_attempts` stay pending for later retry. Failure counters expire after `outbox_consumer_failure_ttl_seconds`, which defaults to 86400 seconds. When the failure count reaches the max attempts, the consumer writes the original message to `outbox_dead_letter_stream_name` and acknowledges the original message only after that write succeeds.
+
+Dead-letter entries include:
+
+- `original_stream`
+- `original_group`
+- `original_message_id`
+- `event_id`
+- `event_type`
+- `aggregate_type`
+- `aggregate_id`
+- `payload`
+- `failure_count`
+- `error_type`
+- `dead_lettered_at`
+
+Invalid messages are copied to the dead-letter stream with `error_type=parse_error` and are acknowledged only after the dead-letter write succeeds. Raw payloads are not logged. Duplicate processed events are acknowledged and counted as skipped without incrementing failure counters or creating dead-letter entries.
 
 ## Retry strategy
 
@@ -225,7 +251,17 @@ Future production workers should add:
 
 ## Dead-letter handling
 
-Dead-lettered events should be visible in logs and dashboards. Operators should be able to inspect the payload, understand the failure, and manually retry after fixing the root cause.
+Dead-lettered events should be visible in logs and dashboards. Operators should be able to inspect the payload in the dead-letter stream, understand the failure class from metadata, and manually retry after fixing the root cause.
+
+Useful Redis checks:
+
+```bash
+redis-cli XLEN stream:orders:dead_letter
+redis-cli XRANGE stream:orders:dead_letter - +
+redis-cli XPENDING stream:orders order-events
+```
+
+Alert on sustained dead-letter stream growth, old pending entries, and unexpected duplicate skip spikes.
 
 ## Observability
 
@@ -237,8 +273,11 @@ Recommended metrics and logs:
 - `outbox_dead_letter_count`
 - `outbox_publish_latency_ms`
 - `outbox_oldest_pending_age_seconds`
+- `outbox_consumer_duplicate_skipped_count`
+- `outbox_consumer_dead_letter_count`
+- Redis consumer group pending count
 
-Current logs include batch completion counts, publish failures, event type, event ID, and aggregate ID. Payloads are intentionally not logged by default.
+Current logs include batch completion counts, publish failures, consumer failures, dead-letter counts, duplicate skip counts, event type, event ID, and aggregate ID. Payloads are intentionally not logged by default.
 
 ## Migration note
 

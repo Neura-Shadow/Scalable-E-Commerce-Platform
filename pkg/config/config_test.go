@@ -29,6 +29,9 @@ func TestOutboxConsumerConfigDefaults(t *testing.T) {
 	previousProcessedTTLSeconds := cfg.OutboxConsumerProcessedTTLSeconds
 	previousClaimMinIdleSeconds := cfg.OutboxConsumerClaimMinIdleSeconds
 	previousClaimBatchSize := cfg.OutboxConsumerClaimBatchSize
+	previousMaxDeliveryAttempts := cfg.OutboxConsumerMaxDeliveryAttempts
+	previousFailureTTLSeconds := cfg.OutboxConsumerFailureTTLSeconds
+	previousDeadLetterStreamName := cfg.OutboxDeadLetterStreamName
 	cfg.OutboxConsumerEnabled = false
 	cfg.OutboxConsumerGroup = ""
 	cfg.OutboxConsumerName = ""
@@ -37,6 +40,9 @@ func TestOutboxConsumerConfigDefaults(t *testing.T) {
 	cfg.OutboxConsumerProcessedTTLSeconds = 0
 	cfg.OutboxConsumerClaimMinIdleSeconds = 0
 	cfg.OutboxConsumerClaimBatchSize = 0
+	cfg.OutboxConsumerMaxDeliveryAttempts = 0
+	cfg.OutboxConsumerFailureTTLSeconds = 0
+	cfg.OutboxDeadLetterStreamName = ""
 	t.Cleanup(func() {
 		cfg.OutboxConsumerEnabled = previousEnabled
 		cfg.OutboxConsumerGroup = previousGroup
@@ -46,6 +52,9 @@ func TestOutboxConsumerConfigDefaults(t *testing.T) {
 		cfg.OutboxConsumerProcessedTTLSeconds = previousProcessedTTLSeconds
 		cfg.OutboxConsumerClaimMinIdleSeconds = previousClaimMinIdleSeconds
 		cfg.OutboxConsumerClaimBatchSize = previousClaimBatchSize
+		cfg.OutboxConsumerMaxDeliveryAttempts = previousMaxDeliveryAttempts
+		cfg.OutboxConsumerFailureTTLSeconds = previousFailureTTLSeconds
+		cfg.OutboxDeadLetterStreamName = previousDeadLetterStreamName
 	})
 
 	assert.False(t, OutboxConsumerEnabled())
@@ -56,4 +65,7 @@ func TestOutboxConsumerConfigDefaults(t *testing.T) {
 	assert.Equal(t, secondsOrDefault(0, DefaultOutboxConsumerProcessedTTLSeconds), OutboxConsumerProcessedTTL())
 	assert.Equal(t, secondsOrDefault(0, DefaultOutboxConsumerClaimMinIdleSeconds), OutboxConsumerClaimMinIdle())
 	assert.Equal(t, DefaultOutboxConsumerClaimBatchSize, OutboxConsumerClaimBatchSize())
+	assert.Equal(t, DefaultOutboxConsumerMaxDeliveryAttempts, OutboxConsumerMaxDeliveryAttempts())
+	assert.Equal(t, secondsOrDefault(0, DefaultOutboxConsumerFailureTTLSeconds), OutboxConsumerFailureTTL())
+	assert.Equal(t, DefaultOutboxDeadLetterStreamName, OutboxDeadLetterStreamName())
 }
