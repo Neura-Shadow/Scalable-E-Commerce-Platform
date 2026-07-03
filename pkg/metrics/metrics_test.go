@@ -44,3 +44,21 @@ func TestUnknownEventTypeLabelsCollapseToUnknown(t *testing.T) {
 	assert.Contains(t, snapshot, `event_type="unknown"`)
 	assert.NotContains(t, snapshot, "order.created.user-123")
 }
+
+func TestOutboxClaimAndFinalizeMetricsUseBoundedLabels(t *testing.T) {
+	ResetForTest()
+
+	RecordOutboxClaim("order.created")
+	RecordOutboxClaimFailure("query_error")
+	RecordOutboxFinalizeFailure("order.created.user-123", "mark_published_failed")
+
+	snapshot, err := SnapshotText()
+
+	require.NoError(t, err)
+	assert.Contains(t, snapshot, "outbox_claim_total")
+	assert.Contains(t, snapshot, "outbox_claim_failure_total")
+	assert.Contains(t, snapshot, "outbox_finalize_failure_total")
+	assert.Contains(t, snapshot, `event_type="order.created"`)
+	assert.Contains(t, snapshot, `event_type="unknown"`)
+	assert.NotContains(t, snapshot, "order.created.user-123")
+}

@@ -30,12 +30,15 @@ type registryState struct {
 	orderRateLimited           *prometheus.CounterVec
 	inventoryInsufficientStock prometheus.Counter
 
-	outboxEventsCreated  *prometheus.CounterVec
-	outboxPublishAttempt *prometheus.CounterVec
-	outboxPublishSuccess *prometheus.CounterVec
-	outboxPublishFailure *prometheus.CounterVec
-	outboxPublishLatency *prometheus.HistogramVec
-	outboxDeadLetter     *prometheus.CounterVec
+	outboxEventsCreated   *prometheus.CounterVec
+	outboxPublishAttempt  *prometheus.CounterVec
+	outboxPublishSuccess  *prometheus.CounterVec
+	outboxPublishFailure  *prometheus.CounterVec
+	outboxPublishLatency  *prometheus.HistogramVec
+	outboxDeadLetter      *prometheus.CounterVec
+	outboxClaim           *prometheus.CounterVec
+	outboxClaimFailure    *prometheus.CounterVec
+	outboxFinalizeFailure *prometheus.CounterVec
 
 	outboxConsumerRead             *prometheus.CounterVec
 	outboxConsumerHandlerSuccess   *prometheus.CounterVec
@@ -114,6 +117,18 @@ func newRegistryState() *registryState {
 			Name: "outbox_dead_letter_total",
 			Help: "Total DB outbox events moved to dead-letter status by event type and reason.",
 		}, []string{"event_type", "reason"}),
+		outboxClaim: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "outbox_claim_total",
+			Help: "Total DB outbox events claimed for publishing by event type.",
+		}, []string{"event_type"}),
+		outboxClaimFailure: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "outbox_claim_failure_total",
+			Help: "Total outbox claim failures by reason.",
+		}, []string{"reason"}),
+		outboxFinalizeFailure: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "outbox_finalize_failure_total",
+			Help: "Total outbox finalize failures by event type and reason.",
+		}, []string{"event_type", "reason"}),
 		outboxConsumerRead: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "outbox_consumer_read_total",
 			Help: "Total Redis Streams consumer messages read by event type.",
@@ -159,6 +174,9 @@ func newRegistryState() *registryState {
 		s.outboxPublishFailure,
 		s.outboxPublishLatency,
 		s.outboxDeadLetter,
+		s.outboxClaim,
+		s.outboxClaimFailure,
+		s.outboxFinalizeFailure,
 		s.outboxConsumerRead,
 		s.outboxConsumerHandlerSuccess,
 		s.outboxConsumerAck,
@@ -246,6 +264,18 @@ func RecordOutboxPublishFailure(eventType, reason string, duration time.Duration
 
 func RecordOutboxDeadLetter(eventType, reason string) {
 	current().outboxDeadLetter.WithLabelValues(eventTypeLabel(eventType), label(reason)).Inc()
+}
+
+func RecordOutboxClaim(eventType string) {
+	current().outboxClaim.WithLabelValues(eventTypeLabel(eventType)).Inc()
+}
+
+func RecordOutboxClaimFailure(reason string) {
+	current().outboxClaimFailure.WithLabelValues(label(reason)).Inc()
+}
+
+func RecordOutboxFinalizeFailure(eventType, reason string) {
+	current().outboxFinalizeFailure.WithLabelValues(eventTypeLabel(eventType), label(reason)).Inc()
 }
 
 func RecordOutboxConsumerRead(eventType string, count int) {

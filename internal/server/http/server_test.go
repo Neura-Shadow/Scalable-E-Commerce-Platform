@@ -1,22 +1,30 @@
 package http
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/quangdangfit/gocommon/logger"
 	"github.com/quangdangfit/gocommon/validation"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	outboxConsumer "goshop/internal/outbox/consumer"
 	outboxService "goshop/internal/outbox/service"
 	"goshop/pkg/config"
 	dbMocks "goshop/pkg/dbs/mocks"
 	appMetrics "goshop/pkg/metrics"
 	redisMocks "goshop/pkg/redis/mocks"
 )
+
+func init() {
+	logger.Initialize(config.ProductionEnv)
+}
 
 func TestNewServer(t *testing.T) {
 	mockDB := dbMocks.NewIDatabase(t)
@@ -113,7 +121,7 @@ func TestServer_HTTPServerHardeningDefaults(t *testing.T) {
 }
 
 func TestServer_NewOutboxPublisherChoosesLogPublisher(t *testing.T) {
-	withOutboxPublisherConfig(t, "log", "")
+	withOutboxPublisherConfig(t, false, "log", "")
 	mockDB := dbMocks.NewIDatabase(t)
 	mockRedis := redisMocks.NewIRedis(t)
 	server := NewServer(validation.New(), mockDB, mockRedis)
@@ -125,7 +133,7 @@ func TestServer_NewOutboxPublisherChoosesLogPublisher(t *testing.T) {
 }
 
 func TestServer_NewOutboxPublisherChoosesRedisStreamPublisher(t *testing.T) {
-	withOutboxPublisherConfig(t, "redis_stream", "stream:test-orders")
+	withOutboxPublisherConfig(t, false, "redis_stream", "stream:test-orders")
 	mockDB := dbMocks.NewIDatabase(t)
 	mockRedis := redisMocks.NewIRedis(t)
 	server := NewServer(validation.New(), mockDB, mockRedis)
@@ -137,17 +145,30 @@ func TestServer_NewOutboxPublisherChoosesRedisStreamPublisher(t *testing.T) {
 }
 
 func TestServer_StartOutboxPublisherRejectsUnknownPublisherType(t *testing.T) {
-	withOutboxPublisherConfig(t, "unknown", "")
+	withOutboxPublisherConfig(t, true, "unknown", "")
 	mockDB := dbMocks.NewIDatabase(t)
 	mockRedis := redisMocks.NewIRedis(t)
 	server := NewServer(validation.New(), mockDB, mockRedis)
 
-	stop, err := server.startOutboxPublisher()
+	stop, err := server.startOutboxPublisher(context.Background())
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown outbox publisher type")
 	require.NotNil(t, stop)
-	stop()
+	require.NoError(t, stop())
+}
+
+func TestServer_StartOutboxPublisherDisabledDoesNotValidatePublisherType(t *testing.T) {
+	withOutboxPublisherConfig(t, false, "unknown", "")
+	mockDB := dbMocks.NewIDatabase(t)
+	mockRedis := redisMocks.NewIRedis(t)
+	server := NewServer(validation.New(), mockDB, mockRedis)
+
+	stop, err := server.startOutboxPublisher(context.Background())
+
+	require.NoError(t, err)
+	require.NotNil(t, stop)
+	require.NoError(t, stop())
 }
 
 func TestServer_StartOutboxConsumerDisabledByDefault(t *testing.T) {
@@ -156,11 +177,11 @@ func TestServer_StartOutboxConsumerDisabledByDefault(t *testing.T) {
 	mockRedis := redisMocks.NewIRedis(t)
 	server := NewServer(validation.New(), mockDB, mockRedis)
 
-	stop, err := server.startOutboxConsumer()
+	stop, err := server.startOutboxConsumer(context.Background())
 
 	require.NoError(t, err)
 	require.NotNil(t, stop)
-	stop()
+	require.NoError(t, stop())
 }
 
 func TestServer_StartOutboxConsumerEnabledUsesConfigValues(t *testing.T) {
@@ -178,14 +199,107 @@ func TestServer_StartOutboxConsumerEnabledUsesConfigValues(t *testing.T) {
 		Maybe()
 	server := NewServer(validation.New(), mockDB, mockRedis)
 
-	stop, err := server.startOutboxConsumer()
+	ctx, cancel := context.WithCancel(context.Background())
+	stop, err := server.startOutboxConsumer(ctx)
 
 	require.NoError(t, err)
 	require.NotNil(t, stop)
-	stop()
+	cancel()
+	require.NoError(t, stop())
 }
 
-func withOutboxPublisherConfig(t *testing.T, publisherType string, streamName string) {
+func TestServer_StartOutboxConsumerEnabledReturnsClearConfigError(t *testing.T) {
+	withOutboxConsumerConfig(t, true, "stream:test-orders", "test-group", "test-consumer", 3, 1, 120, 7, 2)
+	mockDB := dbMocks.NewIDatabase(t)
+	server := NewServer(validation.New(), mockDB, nil)
+
+	stop, err := server.startOutboxConsumer(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "redis cache is required")
+	require.NotNil(t, stop)
+	require.NoError(t, stop())
+}
+
+type fakePublisherLoop struct {
+	entered chan struct{}
+	err     error
+}
+
+func (l *fakePublisherLoop) RunOnce(ctx context.Context) (outboxService.PublishBatchResult, error) {
+	close(l.entered)
+	<-ctx.Done()
+	return outboxService.PublishBatchResult{}, l.err
+}
+
+func TestRunOutboxPublisherLoopExitsOnContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	loop := &fakePublisherLoop{entered: make(chan struct{})}
+
+	done := runOutboxPublisherLoop(ctx, loop, time.Hour)
+	<-loop.entered
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("publisher loop did not exit after context cancellation")
+	}
+}
+
+type fakeConsumerLoop struct {
+	readEntered chan struct{}
+}
+
+func (l *fakeConsumerLoop) RunOnce(ctx context.Context) (outboxConsumer.BatchResult, error) {
+	close(l.readEntered)
+	<-ctx.Done()
+	return outboxConsumer.BatchResult{}, errors.New("context done")
+}
+
+func (l *fakeConsumerLoop) ClaimStaleOnce(ctx context.Context) (outboxConsumer.BatchResult, error) {
+	return outboxConsumer.BatchResult{}, nil
+}
+
+func TestRunOutboxConsumerLoopExitsOnContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	loop := &fakeConsumerLoop{readEntered: make(chan struct{})}
+
+	done := runOutboxConsumerLoop(ctx, loop)
+	<-loop.readEntered
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("consumer loop did not exit after context cancellation")
+	}
+}
+
+func TestServer_RunShutsDownHTTPWhenContextCancels(t *testing.T) {
+	withHTTPPort(t, 0)
+	withOutboxPublisherConfig(t, false, "log", "")
+	withOutboxConsumerConfig(t, false, "stream:orders", "order-events", "local-consumer-1", 10, 5, 86400, 60, 10)
+	mockDB := dbMocks.NewIDatabase(t)
+	mockRedis := redisMocks.NewIRedis(t)
+	server := NewServer(validation.New(), mockDB, mockRedis)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() {
+		done <- server.Run(ctx)
+	}()
+	cancel()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("HTTP server did not shut down after context cancellation")
+	}
+}
+
+func withOutboxPublisherConfig(t *testing.T, enabled bool, publisherType string, streamName string) {
 	t.Helper()
 	cfg := config.GetConfig()
 	previousPublisherType := cfg.OutboxPublisherType
@@ -194,12 +308,22 @@ func withOutboxPublisherConfig(t *testing.T, publisherType string, streamName st
 
 	cfg.OutboxPublisherType = publisherType
 	cfg.OutboxRedisStreamName = streamName
-	cfg.OutboxPublisherEnabled = false
+	cfg.OutboxPublisherEnabled = enabled
 
 	t.Cleanup(func() {
 		cfg.OutboxPublisherType = previousPublisherType
 		cfg.OutboxRedisStreamName = previousStreamName
 		cfg.OutboxPublisherEnabled = previousEnabled
+	})
+}
+
+func withHTTPPort(t *testing.T, port int) {
+	t.Helper()
+	cfg := config.GetConfig()
+	previousPort := cfg.HttpPort
+	cfg.HttpPort = port
+	t.Cleanup(func() {
+		cfg.HttpPort = previousPort
 	})
 }
 

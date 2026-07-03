@@ -1,6 +1,11 @@
 package main
 
 import (
+	"context"
+	"os"
+	"os/signal"
+	"syscall"
+
 	"github.com/quangdangfit/gocommon/logger"
 	"github.com/quangdangfit/gocommon/validation"
 
@@ -10,6 +15,7 @@ import (
 	productModel "goshop/internal/product/model"
 	grpcServer "goshop/internal/server/grpc"
 	httpServer "goshop/internal/server/http"
+	"goshop/internal/server/lifecycle"
 	userModel "goshop/internal/user/model"
 	"goshop/pkg/config"
 	"goshop/pkg/dbs"
@@ -54,15 +60,12 @@ func main() {
 		Database: cfg.RedisDB,
 	})
 
-	go func() {
-		httpSvr := httpServer.NewServer(validator, db, cache)
-		if err = httpSvr.Run(); err != nil {
-			logger.Fatal(err)
-		}
-	}()
-
+	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	httpSvr := httpServer.NewServer(validator, db, cache)
 	grpcSvr := grpcServer.NewServer(validator, db, cache)
-	if err = grpcSvr.Run(); err != nil {
+
+	if err = lifecycle.Run(rootCtx, httpSvr, grpcSvr); err != nil {
 		logger.Fatal(err)
 	}
 }

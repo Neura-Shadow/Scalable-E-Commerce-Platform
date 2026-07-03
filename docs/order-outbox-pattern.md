@@ -25,8 +25,8 @@ Implemented now:
 - Redis-backed processed-event keys for consumed-event idempotency
 - bounded Redis Streams consumer failure counters and dead-letter stream movement
 - `order.created` event creation inside the existing order Unit of Work transaction
-- retry bookkeeping with `attempts`, `next_attempt_at`, and `dead_letter`
-- locked pending-event batch fetching with `FOR UPDATE SKIP LOCKED`
+- retry bookkeeping with `attempts`, `next_attempt_at`, `processing`, and `dead_letter`
+- short claim transactions with `FOR UPDATE SKIP LOCKED`, followed by publish outside the DB transaction
 
 Not implemented yet:
 
@@ -53,6 +53,8 @@ CREATE TABLE outbox_events (
   status TEXT NOT NULL DEFAULT 'pending',
   attempts INT NOT NULL DEFAULT 0,
   next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  locked_at TIMESTAMPTZ,
+  locked_by VARCHAR(128),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   published_at TIMESTAMPTZ
 );
@@ -118,6 +120,7 @@ outbox_publish_batch_size = 100
 outbox_publish_max_attempts = 3
 outbox_publish_retry_base_seconds = 60
 outbox_publish_interval_seconds = 30
+outbox_processing_timeout_seconds = 900
 outbox_consumer_enabled = false
 outbox_consumer_group = order-events
 outbox_consumer_name = local-consumer-1
@@ -172,13 +175,16 @@ outbox_dead_letter_stream_name: stream:orders:dead_letter
 
 The worker:
 
-1. select pending outbox rows whose `next_attempt_at <= now()`
-2. publish each event through the configured `EventPublisher`
-3. mark successful rows as published
-4. increment attempts and set `next_attempt_at` with backoff for failures
-5. move exhausted events to a dead-letter state
+1. claim pending outbox rows whose `next_attempt_at <= now()` in a short transaction
+2. mark claimed rows as `processing` with `locked_at` and `locked_by`
+3. commit the claim transaction before calling the configured `EventPublisher`
+4. publish each event outside the database transaction
+5. finalize each event in a short transaction:
+   - success: mark the row `published`
+   - transient failure: increment `attempts`, clear the processing claim, and set `next_attempt_at`
+   - exhausted failure: move the row to `dead_letter`
 
-Locked fetches use `FOR UPDATE SKIP LOCKED` so multiple enabled workers can avoid claiming the same pending rows while a batch transaction is active.
+Claim queries use `FOR UPDATE SKIP LOCKED` so multiple enabled workers avoid claiming the same row. Publishing happens after the claim commits, so Redis Streams `XADD` or future broker I/O does not hold PostgreSQL row locks. Rows left in `processing` longer than `outbox_processing_timeout_seconds` are treated as stale and may be claimed again by a later worker. This recovery path favors durable eventual delivery; future non-idempotent publishers should keep downstream writes idempotent by `event_id`.
 
 ## Redis Streams consumer foundation
 
@@ -210,9 +216,11 @@ processed:events:{eventID}
 
 The foundation checks the key before handling and sets it after the current handler succeeds. This ordering prevents acknowledging an event before handler success. If a future handler performs non-idempotent business side effects, it should either make those side effects idempotent by `event_id` or move the processed-event marker into the same durable commit boundary as the side effect.
 
-## Pending recovery and dead-letter strategy
+## Pending and processing recovery
 
-The current pending recovery path uses `XAUTOCLAIM` for messages older than `outbox_consumer_claim_min_idle_seconds`, processes them through the same handler, and applies the same failure counter and dead-letter rules as new messages.
+Database outbox rows recover through two paths. Rows in `pending` retry when `next_attempt_at` becomes due. Rows in `processing` retry when `locked_at` is older than `outbox_processing_timeout_seconds`; a later publisher claim clears the stale ownership by assigning a new `locked_at` and `locked_by`.
+
+The Redis Streams consumer pending recovery path uses `XAUTOCLAIM` for messages older than `outbox_consumer_claim_min_idle_seconds`, processes them through the same handler, and applies the same failure counter and dead-letter rules as new messages.
 
 Failure counters use this Redis key pattern:
 
@@ -266,6 +274,14 @@ redis-cli XRANGE stream:orders:dead_letter - + COUNT 10
 redis-cli XPENDING stream:orders order-events
 ```
 
+Useful PostgreSQL checks:
+
+```sql
+SELECT count(*) FROM outbox_events WHERE status = 'pending';
+SELECT count(*) FROM outbox_events WHERE status = 'processing' AND locked_at < now() - interval '15 minutes';
+SELECT status, count(*) FROM outbox_events GROUP BY status;
+```
+
 Alert on sustained dead-letter stream growth, old pending entries, and unexpected duplicate skip spikes.
 
 ## Observability
@@ -278,6 +294,9 @@ Recommended metrics and logs:
 - `outbox_publish_failure_total`
 - `outbox_publish_duration_seconds`
 - `outbox_dead_letter_total`
+- `outbox_claim_total`
+- `outbox_claim_failure_total`
+- `outbox_finalize_failure_total`
 - `outbox_consumer_read_total`
 - `outbox_consumer_ack_total`
 - `outbox_consumer_failure_total`

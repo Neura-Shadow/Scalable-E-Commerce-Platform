@@ -12,6 +12,7 @@ type OutboxEventStatus string
 
 const (
 	OutboxEventStatusPending    OutboxEventStatus = "pending"
+	OutboxEventStatusProcessing OutboxEventStatus = "processing"
 	OutboxEventStatusPublished  OutboxEventStatus = "published"
 	OutboxEventStatusDeadLetter OutboxEventStatus = "dead_letter"
 )
@@ -25,6 +26,8 @@ type OutboxEvent struct {
 	Status        OutboxEventStatus `json:"status" gorm:"type:varchar(32);not null;index"`
 	Attempts      int               `json:"attempts" gorm:"not null;default:0"`
 	NextAttemptAt time.Time         `json:"next_attempt_at" gorm:"not null;index"`
+	LockedAt      *time.Time        `json:"locked_at" gorm:"index"`
+	LockedBy      string            `json:"locked_by" gorm:"type:varchar(128);index"`
 	CreatedAt     time.Time         `json:"created_at"`
 	PublishedAt   *time.Time        `json:"published_at" gorm:"index"`
 }

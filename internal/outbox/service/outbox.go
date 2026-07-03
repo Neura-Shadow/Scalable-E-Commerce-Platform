@@ -20,6 +20,7 @@ type IOutboxService interface {
 	CreatePending(ctx context.Context, aggregateType, aggregateID, eventType string, payload any) (*model.OutboxEvent, error)
 	ListPendingReady(ctx context.Context, limit int) ([]*model.OutboxEvent, error)
 	ListPendingReadyLocked(ctx context.Context, limit int) ([]*model.OutboxEvent, error)
+	ClaimReady(ctx context.Context, limit int, lockedBy string, processingTimeout time.Duration) ([]*model.OutboxEvent, error)
 	MarkPublished(ctx context.Context, eventID string) error
 	RecordPublishFailure(ctx context.Context, event *model.OutboxEvent) error
 	Publish(ctx context.Context, publisher EventPublisher, event *model.OutboxEvent) error
@@ -29,6 +30,7 @@ type OutboxRepository interface {
 	CreatePending(ctx context.Context, event *model.OutboxEvent) error
 	ListPendingReady(ctx context.Context, now time.Time, limit int) ([]*model.OutboxEvent, error)
 	ListPendingReadyLocked(ctx context.Context, now time.Time, limit int) ([]*model.OutboxEvent, error)
+	ClaimReady(ctx context.Context, now time.Time, limit int, lockedBy string, staleBefore time.Time) ([]*model.OutboxEvent, error)
 	MarkPublished(ctx context.Context, eventID string, publishedAt time.Time) error
 	MarkPublishFailed(ctx context.Context, eventID string, nextAttemptAt time.Time) error
 	MarkDeadLetter(ctx context.Context, eventID string) error
@@ -117,6 +119,11 @@ func (s *OutboxService) ListPendingReady(ctx context.Context, limit int) ([]*mod
 
 func (s *OutboxService) ListPendingReadyLocked(ctx context.Context, limit int) ([]*model.OutboxEvent, error) {
 	return s.repo.ListPendingReadyLocked(ctx, s.now(), limit)
+}
+
+func (s *OutboxService) ClaimReady(ctx context.Context, limit int, lockedBy string, processingTimeout time.Duration) ([]*model.OutboxEvent, error) {
+	now := s.now()
+	return s.repo.ClaimReady(ctx, now, limit, lockedBy, now.Add(-processingTimeout))
 }
 
 func (s *OutboxService) MarkPublished(ctx context.Context, eventID string) error {

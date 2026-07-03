@@ -61,6 +61,30 @@ func (r *fakeOutboxRepository) ListPendingReadyLocked(ctx context.Context, now t
 	return r.ListPendingReady(ctx, now, limit)
 }
 
+func (r *fakeOutboxRepository) ClaimReady(_ context.Context, now time.Time, limit int, lockedBy string, staleBefore time.Time) ([]*model.OutboxEvent, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	ready := make([]*model.OutboxEvent, 0)
+	for _, event := range r.events {
+		isPendingReady := event.Status == model.OutboxEventStatusPending && !event.NextAttemptAt.After(now)
+		isStaleProcessing := event.Status == model.OutboxEventStatusProcessing &&
+			(event.LockedAt == nil || !event.LockedAt.After(staleBefore))
+		if isPendingReady || isStaleProcessing {
+			ready = append(ready, event)
+		}
+	}
+	if limit > 0 && len(ready) > limit {
+		ready = ready[:limit]
+	}
+	for _, event := range ready {
+		event.Status = model.OutboxEventStatusProcessing
+		event.LockedAt = &now
+		event.LockedBy = lockedBy
+	}
+	return ready, nil
+}
+
 func (r *fakeOutboxRepository) MarkPublished(_ context.Context, eventID string, publishedAt time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -68,6 +92,8 @@ func (r *fakeOutboxRepository) MarkPublished(_ context.Context, eventID string, 
 	event := r.events[eventID]
 	event.Status = model.OutboxEventStatusPublished
 	event.PublishedAt = &publishedAt
+	event.LockedAt = nil
+	event.LockedBy = ""
 	return nil
 }
 
@@ -79,6 +105,8 @@ func (r *fakeOutboxRepository) MarkPublishFailed(_ context.Context, eventID stri
 	event.Attempts++
 	event.NextAttemptAt = nextAttemptAt
 	event.Status = model.OutboxEventStatusPending
+	event.LockedAt = nil
+	event.LockedBy = ""
 	return nil
 }
 
@@ -87,6 +115,8 @@ func (r *fakeOutboxRepository) MarkDeadLetter(_ context.Context, eventID string)
 	defer r.mu.Unlock()
 
 	r.events[eventID].Status = model.OutboxEventStatusDeadLetter
+	r.events[eventID].LockedAt = nil
+	r.events[eventID].LockedBy = ""
 	return nil
 }
 
@@ -153,6 +183,32 @@ func TestListPendingReadyRespectsBatchSize(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Len(t, events, 2)
+}
+
+func TestClaimReadyMarksPendingAndStaleProcessingEvents(t *testing.T) {
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	staleLockedAt := now.Add(-20 * time.Minute)
+	freshLockedAt := now.Add(-time.Minute)
+	ready := &model.OutboxEvent{ID: "ready", Status: model.OutboxEventStatusPending, NextAttemptAt: now}
+	future := &model.OutboxEvent{ID: "future", Status: model.OutboxEventStatusPending, NextAttemptAt: now.Add(time.Minute)}
+	staleProcessing := &model.OutboxEvent{ID: "stale-processing", Status: model.OutboxEventStatusProcessing, LockedAt: &staleLockedAt, NextAttemptAt: now.Add(-time.Minute)}
+	freshProcessing := &model.OutboxEvent{ID: "fresh-processing", Status: model.OutboxEventStatusProcessing, LockedAt: &freshLockedAt, NextAttemptAt: now.Add(-time.Minute)}
+	repo := newFakeOutboxRepository(ready, future, staleProcessing, freshProcessing)
+	svc := NewOutboxService(repo, WithNow(func() time.Time { return now }))
+
+	events, err := svc.ClaimReady(context.Background(), 10, "worker-1", 10*time.Minute)
+
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	assert.ElementsMatch(t, []string{"ready", "stale-processing"}, []string{events[0].ID, events[1].ID})
+	for _, event := range events {
+		assert.Equal(t, model.OutboxEventStatusProcessing, event.Status)
+		assert.Equal(t, "worker-1", event.LockedBy)
+		require.NotNil(t, event.LockedAt)
+		assert.Equal(t, now, *event.LockedAt)
+	}
+	assert.Equal(t, model.OutboxEventStatusPending, future.Status)
+	assert.Equal(t, model.OutboxEventStatusProcessing, freshProcessing.Status)
 }
 
 func TestPublishMarksEventPublished(t *testing.T) {

@@ -17,6 +17,7 @@ The outbox background publisher is disabled by default. To include Redis Streams
 outbox_publisher_enabled: true
 outbox_publisher_type: redis_stream
 outbox_redis_stream_name: stream:orders
+outbox_processing_timeout_seconds: 900
 ```
 
 To include the consumer group foundation in the same local run, also set:
@@ -132,6 +133,7 @@ At minimum, record:
 - HTTP p95/p99 latency from `http_request_duration_seconds`
 - idempotency duplicate count
 - rate-limited request count
+- outbox claim/finalize failure counts
 - outbox publish success/failure counts
 - consumer failure and dead-letter counts
 
@@ -151,7 +153,7 @@ A starting load-test gate is zero 5xx responses, zero negative stock observation
 
 ## Optional outbox publisher check
 
-When Redis Streams publishing is enabled during a load run, successful orders should eventually create entries in the configured stream and mark their outbox rows as `published`. When the consumer foundation is also enabled, messages should be read with `XREADGROUP`, skipped if `processed:events:{eventID}` already exists, and acknowledged with `XACK` after the metadata-only handler succeeds. Repeated handler failures are counted with `consumer:failures:{stream}:{group}:{eventID}`, expire after `outbox_consumer_failure_ttl_seconds`, and route to `stream:orders:dead_letter` after the configured max attempts. Invalid messages are dead-lettered instead of being retried forever. Originals are acknowledged only after the dead-letter write succeeds.
+When Redis Streams publishing is enabled during a load run, successful orders should eventually create entries in the configured stream and mark their outbox rows as `published`. The publisher first claims due rows as `processing` in a short DB transaction, publishes outside that transaction, and finalizes each row afterward. Rows stuck in `processing` longer than `outbox_processing_timeout_seconds` are eligible for a later claim. When the consumer foundation is also enabled, messages should be read with `XREADGROUP`, skipped if `processed:events:{eventID}` already exists, and acknowledged with `XACK` after the metadata-only handler succeeds. Repeated handler failures are counted with `consumer:failures:{stream}:{group}:{eventID}`, expire after `outbox_consumer_failure_ttl_seconds`, and route to `stream:orders:dead_letter` after the configured max attempts. Invalid messages are dead-lettered instead of being retried forever. Originals are acknowledged only after the dead-letter write succeeds.
 
 Useful checks:
 
@@ -170,6 +172,8 @@ curl -s http://localhost:8888/metrics
 Track:
 
 - stream length growth
+- DB rows stuck in `processing`
+- outbox claim/finalize failures
 - outbox publish failure count
 - dead-letter count
 - publisher batch latency
@@ -178,6 +182,8 @@ Track:
 - stale messages claimed with `XAUTOCLAIM`
 - duplicate event IDs skipped
 - dead-letter stream growth rate
+- `outbox_claim_failure_total`
+- `outbox_finalize_failure_total`
 - `outbox_publish_failure_total`
 - `outbox_consumer_failure_total`
 - `outbox_consumer_dead_letter_total`

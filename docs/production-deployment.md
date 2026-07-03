@@ -49,6 +49,7 @@ outbox_publish_batch_size
 outbox_publish_max_attempts
 outbox_publish_retry_base_seconds
 outbox_publish_interval_seconds
+outbox_processing_timeout_seconds
 outbox_consumer_enabled
 outbox_consumer_group
 outbox_consumer_name
@@ -118,6 +119,17 @@ scrape_configs:
       - targets: ["api:8888"]
 ```
 
+## Service lifecycle
+
+The API process owns one root context created from `SIGINT` and `SIGTERM`. That context coordinates the HTTP server, gRPC server, optional outbox publisher loop, and optional Redis Streams consumer loop.
+
+Shutdown behavior:
+
+- HTTP stops accepting new requests and uses a graceful shutdown timeout.
+- gRPC uses `GracefulStop` and falls back to `Stop` if graceful shutdown exceeds its timeout.
+- The outbox publisher and Redis Streams consumer derive their contexts from the same root context and exit when it is cancelled.
+- `outbox_publisher_enabled=false` and `outbox_consumer_enabled=false` remain the default, so background workers do not start unless explicitly enabled.
+
 ## Database operations
 
 The current app uses GORM auto-migration during startup. The auto-migrated models include users, products, inventory, orders, order lines, and `outbox_events`.
@@ -136,7 +148,10 @@ Current behavior:
 - optional background publisher startup is controlled by `outbox_publisher_enabled`
 - default startup leaves the publisher disabled and uses `outbox_publisher_type=log`
 - Redis Streams consumer startup is separately disabled by `outbox_consumer_enabled=false`
-- pending batch fetches use `FOR UPDATE SKIP LOCKED`
+- pending batch claims use `FOR UPDATE SKIP LOCKED`
+- claimed rows are marked `processing` with `locked_at` and `locked_by`
+- publishing happens outside the DB transaction, then each event is finalized in a short transaction
+- stale `processing` rows older than `outbox_processing_timeout_seconds` can be claimed by a later worker run
 - the no-op/log publisher logs event metadata only and does not log payloads
 - the Redis Streams publisher writes event metadata and JSON payloads to `outbox_redis_stream_name`
 - the Redis Streams consumer foundation reads with `XREADGROUP`, uses processed-event keys by `event_id`, acknowledges success with `XACK`, claims stale pending entries with `XAUTOCLAIM`, tracks handler failures with `consumer:failures:{stream}:{group}:{eventID}`, and writes poison messages to `outbox_dead_letter_stream_name`
@@ -147,6 +162,7 @@ Enable Redis Streams publishing with:
 outbox_publisher_enabled: true
 outbox_publisher_type: redis_stream
 outbox_redis_stream_name: stream:orders
+outbox_processing_timeout_seconds: 900
 ```
 
 Enable Redis Streams consuming with:
@@ -168,9 +184,11 @@ outbox_dead_letter_stream_name: stream:orders:dead_letter
 Operational expectations for the publisher:
 
 - process only `pending` rows whose `next_attempt_at` is due
+- avoid holding DB row locks while publishing to Redis Streams or another broker
 - mark successful publishes as `published`
 - increment `attempts` and reschedule transient failures
 - move exhausted events to `dead_letter`
+- alert on rows stuck in `processing` longer than `outbox_processing_timeout_seconds`
 - alert on dead-letter growth
 
 The repository includes a Redis Streams consumer foundation, but the built-in handler only logs metadata and performs no real business side effects. Future handlers should process messages idempotently by `event_id`, inspect pending entries with `XPENDING`, claim stale pending entries with `XAUTOCLAIM`, and acknowledge only after successful side effects. If handling fails repeatedly, the current consumer moves the message to `stream:orders:dead_letter` after bounded retries and acknowledges the original only after the dead-letter write succeeds. Failure counters expire after `outbox_consumer_failure_ttl_seconds`. Invalid messages are dead-lettered instead of retried forever. Duplicate processed events are acknowledged without counting as failures.
@@ -188,12 +206,23 @@ redis-cli XRANGE stream:orders:dead_letter - + COUNT 10
 redis-cli XPENDING stream:orders order-events
 ```
 
+Useful PostgreSQL outbox checks:
+
+```sql
+SELECT count(*) FROM outbox_events WHERE status = 'pending';
+SELECT count(*) FROM outbox_events WHERE status = 'processing' AND locked_at < now() - interval '15 minutes';
+SELECT status, count(*) FROM outbox_events GROUP BY status;
+```
+
 Application Prometheus metrics:
 
 - `outbox_publish_attempt_total`
 - `outbox_publish_success_total`
 - `outbox_publish_failure_total`
 - `outbox_publish_duration_seconds`
+- `outbox_claim_total`
+- `outbox_claim_failure_total`
+- `outbox_finalize_failure_total`
 - `outbox_consumer_read_total`
 - `outbox_consumer_ack_total`
 - `outbox_consumer_failure_total`
@@ -209,7 +238,9 @@ Example PromQL:
 histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, path))
 histogram_quantile(0.99, sum(rate(order_place_duration_seconds_bucket[5m])) by (le))
 sum(rate(order_place_failed_total[5m])) by (reason)
+sum(rate(outbox_claim_failure_total[5m])) by (reason)
 sum(rate(outbox_publish_failure_total[5m])) by (event_type, reason)
+sum(rate(outbox_finalize_failure_total[5m])) by (event_type, reason)
 increase(outbox_consumer_dead_letter_total[15m])
 ```
 
@@ -223,6 +254,7 @@ Recommended dashboard panels:
 - idempotency duplicate count
 - rate-limited order requests
 - outbox publish success/failure
+- outbox claim/finalize failure
 - Redis Streams consumer pending and stale-claim behavior
 - DLQ growth
 
@@ -231,9 +263,10 @@ Alert ideas:
 - sustained DLQ growth
 - rising insufficient stock conflicts
 - outbox publish failure spike
+- outbox claim/finalize failure spike
 - consumer failure spike
 - high p99 latency
-- Redis stream pending growth
+- Redis stream pending growth or DB `processing` rows older than the configured timeout
 
 Label cardinality rules:
 
@@ -262,7 +295,7 @@ Label cardinality rules:
 6. Verify `/metrics` from the Prometheus network path if metrics are enabled.
 7. Run a smoke test for login and order placement.
 8. Verify that successful order placement creates one pending `order.created` outbox row.
-9. If Redis Streams publishing is enabled, verify that `stream:orders` receives an entry and the outbox row is marked `published`.
+9. If Redis Streams publishing is enabled, verify that the row is claimed as `processing`, `stream:orders` receives an entry, and the outbox row is finalized as `published`.
 10. If Redis Streams consuming is enabled, verify that group `order-events` exists and messages are acknowledged after the log/no-op handler succeeds.
 11. Verify `XLEN stream:orders:dead_letter`, `XRANGE stream:orders:dead_letter - +`, and `XPENDING stream:orders order-events` during rollout.
 12. Monitor order failure logs, rate-limited counts, outbox dead-letter counts, stream length, pending entries, stale claims, duplicate skips, metrics scrape health, and latency.

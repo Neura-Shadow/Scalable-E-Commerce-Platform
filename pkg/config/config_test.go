@@ -32,6 +32,7 @@ func TestOutboxConsumerConfigDefaults(t *testing.T) {
 	previousMaxDeliveryAttempts := cfg.OutboxConsumerMaxDeliveryAttempts
 	previousFailureTTLSeconds := cfg.OutboxConsumerFailureTTLSeconds
 	previousDeadLetterStreamName := cfg.OutboxDeadLetterStreamName
+	previousProcessingTimeoutSeconds := cfg.OutboxProcessingTimeoutSeconds
 	cfg.OutboxConsumerEnabled = false
 	cfg.OutboxConsumerGroup = ""
 	cfg.OutboxConsumerName = ""
@@ -43,6 +44,7 @@ func TestOutboxConsumerConfigDefaults(t *testing.T) {
 	cfg.OutboxConsumerMaxDeliveryAttempts = 0
 	cfg.OutboxConsumerFailureTTLSeconds = 0
 	cfg.OutboxDeadLetterStreamName = ""
+	cfg.OutboxProcessingTimeoutSeconds = 0
 	t.Cleanup(func() {
 		cfg.OutboxConsumerEnabled = previousEnabled
 		cfg.OutboxConsumerGroup = previousGroup
@@ -55,6 +57,7 @@ func TestOutboxConsumerConfigDefaults(t *testing.T) {
 		cfg.OutboxConsumerMaxDeliveryAttempts = previousMaxDeliveryAttempts
 		cfg.OutboxConsumerFailureTTLSeconds = previousFailureTTLSeconds
 		cfg.OutboxDeadLetterStreamName = previousDeadLetterStreamName
+		cfg.OutboxProcessingTimeoutSeconds = previousProcessingTimeoutSeconds
 	})
 
 	assert.False(t, OutboxConsumerEnabled())
@@ -68,6 +71,7 @@ func TestOutboxConsumerConfigDefaults(t *testing.T) {
 	assert.Equal(t, DefaultOutboxConsumerMaxDeliveryAttempts, OutboxConsumerMaxDeliveryAttempts())
 	assert.Equal(t, secondsOrDefault(0, DefaultOutboxConsumerFailureTTLSeconds), OutboxConsumerFailureTTL())
 	assert.Equal(t, DefaultOutboxDeadLetterStreamName, OutboxDeadLetterStreamName())
+	assert.Equal(t, secondsOrDefault(0, DefaultOutboxProcessingTimeoutSeconds), OutboxProcessingTimeout())
 }
 
 func TestMetricsConfigDefaults(t *testing.T) {

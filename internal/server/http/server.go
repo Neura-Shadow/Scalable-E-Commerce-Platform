@@ -4,11 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
-	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -45,6 +41,17 @@ type Server struct {
 	cache     redis.IRedis
 }
 
+type backgroundStopFunc func() error
+
+type publisherRunner interface {
+	RunOnce(ctx context.Context) (outboxService.PublishBatchResult, error)
+}
+
+type consumerRunner interface {
+	RunOnce(ctx context.Context) (outboxConsumer.BatchResult, error)
+	ClaimStaleOnce(ctx context.Context) (outboxConsumer.BatchResult, error)
+}
+
 func NewServer(validator validation.Validation, db dbs.IDatabase, cache redis.IRedis) *Server {
 	engine := gin.Default()
 	_ = engine.SetTrustedProxies(nil)
@@ -60,43 +67,58 @@ func NewServer(validator validation.Validation, db dbs.IDatabase, cache redis.IR
 	}
 }
 
-func (s Server) Run() error {
+func (s Server) Run(ctx context.Context) error {
 	if s.cfg.Environment == config.ProductionEnv {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
 	if err := s.MapRoutes(); err != nil {
-		log.Fatalf("MapRoutes Error: %v", err)
+		return fmt.Errorf("map HTTP routes: %w", err)
 	}
 	s.engine.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
-	stopOutboxPublisher, err := s.startOutboxPublisher()
+	stopOutboxPublisher, err := s.startOutboxPublisher(ctx)
 	if err != nil {
 		return err
 	}
-	defer stopOutboxPublisher()
-	stopOutboxConsumer, err := s.startOutboxConsumer()
+	defer func() {
+		if err := stopOutboxPublisher(); err != nil {
+			logger.Error("outbox_publisher_shutdown_failed", err)
+		}
+	}()
+	stopOutboxConsumer, err := s.startOutboxConsumer(ctx)
 	if err != nil {
 		return err
 	}
-	defer stopOutboxConsumer()
-
-	// Start http server
-	logger.Info("HTTP server is listening on PORT: ", s.cfg.HttpPort)
-	httpServer := s.newHTTPServer()
-	go func() {
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("Running HTTP server: %v", err)
+	defer func() {
+		if err := stopOutboxConsumer(); err != nil {
+			logger.Error("outbox_consumer_shutdown_failed", err)
 		}
 	}()
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	logger.Info("HTTP server is listening on PORT: ", s.cfg.HttpPort)
+	httpServer := s.newHTTPServer()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- httpServer.ListenAndServe()
+	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("run HTTP server: %w", err)
+		}
+		return nil
+	case <-ctx.Done():
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := httpServer.Shutdown(ctx); err != nil {
-		return err
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		return fmt.Errorf("shutdown HTTP server: %w", err)
+	}
+	serveErr := <-errCh
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		return fmt.Errorf("run HTTP server: %w", serveErr)
 	}
 
 	return nil
@@ -154,14 +176,13 @@ func (s Server) newOutboxPublisher() (outboxService.EventPublisher, error) {
 	}
 }
 
-func (s Server) startOutboxPublisher() (context.CancelFunc, error) {
-	ctx, cancel := context.WithCancel(context.Background())
+func (s Server) startOutboxPublisher(parent context.Context) (backgroundStopFunc, error) {
+	if !config.OutboxPublisherEnabled() {
+		return noopBackgroundStop, nil
+	}
 	publisher, err := s.newOutboxPublisher()
 	if err != nil {
-		return cancel, err
-	}
-	if !config.OutboxPublisherEnabled() {
-		return cancel, nil
+		return noopBackgroundStop, err
 	}
 
 	worker := outboxService.NewPublisherWorker(
@@ -170,35 +191,15 @@ func (s Server) startOutboxPublisher() (context.CancelFunc, error) {
 		outboxService.WithPublisherBatchSize(config.OutboxPublishBatchSize()),
 		outboxService.WithPublisherMaxAttempts(config.OutboxPublishMaxAttempts()),
 		outboxService.WithPublisherRetryBase(config.OutboxPublishRetryBase()),
+		outboxService.WithPublisherProcessingTimeout(config.OutboxProcessingTimeout()),
 	)
-	interval := config.OutboxPublishInterval()
-	ticker := time.NewTicker(interval)
+	ctx, cancel := context.WithCancel(parent)
+	done := runOutboxPublisherLoop(ctx, worker, config.OutboxPublishInterval())
 
-	go func() {
-		defer ticker.Stop()
-		for {
-			result, err := worker.RunOnce(ctx)
-			if err != nil {
-				logger.Error("outbox_publisher_batch_failed", err)
-			} else if result.Fetched > 0 {
-				logger.Info(
-					"outbox_publisher_batch_complete fetched=", result.Fetched,
-					" published=", result.Published,
-					" failed=", result.Failed,
-					" dead_lettered=", result.DeadLettered,
-					" latency_ms=", result.Latency.Milliseconds(),
-				)
-			}
-
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-		}
-	}()
-
-	return cancel, nil
+	return func() error {
+		cancel()
+		return waitBackgroundDone(done)
+	}, nil
 }
 
 func (s Server) newOutboxConsumer() *outboxConsumer.RedisConsumer {
@@ -219,19 +220,63 @@ func (s Server) newOutboxConsumer() *outboxConsumer.RedisConsumer {
 	)
 }
 
-func (s Server) startOutboxConsumer() (context.CancelFunc, error) {
-	ctx, cancel := context.WithCancel(context.Background())
+func (s Server) startOutboxConsumer(parent context.Context) (backgroundStopFunc, error) {
 	if !config.OutboxConsumerEnabled() {
-		return cancel, nil
+		return noopBackgroundStop, nil
 	}
 
+	ctx, cancel := context.WithCancel(parent)
 	consumer := s.newOutboxConsumer()
 	if err := consumer.EnsureGroup(ctx); err != nil {
 		cancel()
-		return cancel, err
+		return noopBackgroundStop, err
 	}
 
+	done := runOutboxConsumerLoop(ctx, consumer)
+	return func() error {
+		cancel()
+		return waitBackgroundDone(done)
+	}, nil
+}
+
+func runOutboxPublisherLoop(ctx context.Context, worker publisherRunner, interval time.Duration) <-chan struct{} {
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			result, err := worker.RunOnce(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				logger.Error("outbox_publisher_batch_failed", err)
+			} else if result.Fetched > 0 {
+				logger.Info(
+					"outbox_publisher_batch_complete fetched=", result.Fetched,
+					" published=", result.Published,
+					" failed=", result.Failed,
+					" dead_lettered=", result.DeadLettered,
+					" latency_ms=", result.Latency.Milliseconds(),
+				)
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+
+	return done
+}
+
+func runOutboxConsumerLoop(ctx context.Context, consumer consumerRunner) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
 		for {
 			select {
 			case <-ctx.Done():
@@ -241,6 +286,9 @@ func (s Server) startOutboxConsumer() (context.CancelFunc, error) {
 
 			result, err := consumer.RunOnce(ctx)
 			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				logger.Error("outbox_consumer_batch_failed", err)
 			} else if result.Read > 0 {
 				logger.Info(
@@ -256,6 +304,9 @@ func (s Server) startOutboxConsumer() (context.CancelFunc, error) {
 
 			claimResult, err := consumer.ClaimStaleOnce(ctx)
 			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				logger.Error("outbox_consumer_claim_failed", err)
 			} else if claimResult.Read > 0 {
 				logger.Info(
@@ -271,5 +322,18 @@ func (s Server) startOutboxConsumer() (context.CancelFunc, error) {
 		}
 	}()
 
-	return cancel, nil
+	return done
+}
+
+func noopBackgroundStop() error {
+	return nil
+}
+
+func waitBackgroundDone(done <-chan struct{}) error {
+	select {
+	case <-done:
+		return nil
+	case <-time.After(10 * time.Second):
+		return errors.New("background worker did not stop before timeout")
+	}
 }

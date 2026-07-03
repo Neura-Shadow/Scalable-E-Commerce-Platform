@@ -36,6 +36,7 @@ HTTP handler -> order service -> repository/inventory/product ports -> GORM/Redi
 - Transactional outbox foundation for `order.created` events.
 - Optional log or Redis Streams outbox publisher worker with retry and dead-letter bookkeeping.
 - Optional Redis Streams consumer group foundation with idempotent event processing, bounded failure tracking, and poison-message dead-letter handling.
+- Coordinated HTTP/gRPC/background worker lifecycle with root-context shutdown.
 - HTTP server hardening with explicit timeouts, max header size, body size limits, trusted proxy lockdown, and graceful shutdown.
 - Swagger API documentation.
 - Docker Compose for PostgreSQL and Redis.
@@ -94,7 +95,9 @@ Successful order placement creates one pending `order.created` row in `outbox_ev
 }
 ```
 
-The current implementation stores durable outbox rows and supports publish bookkeeping, retries, and `dead_letter` status. It also provides a controlled `RunOnce` publisher worker and optional background startup controlled by `outbox_publisher_enabled`, which defaults to `false`.
+The current implementation stores durable outbox rows and supports publish bookkeeping, retries, `processing` claims, and `dead_letter` status. It also provides a controlled `RunOnce` publisher worker and optional background startup controlled by `outbox_publisher_enabled`, which defaults to `false`.
+
+The publisher uses a claim/publish/finalize flow: it claims ready rows as `processing` inside a short `FOR UPDATE SKIP LOCKED` transaction, commits that claim, publishes to the configured publisher outside the database transaction, and finalizes each row in short follow-up transactions. This keeps PostgreSQL row locks out of Redis Streams `XADD` and other external publish I/O. Stuck `processing` rows older than `outbox_processing_timeout_seconds` can be claimed again by a later worker run.
 
 The default publisher type is `log`, which records event metadata only. Redis Streams can be enabled when Redis should receive durable stream entries:
 
@@ -102,6 +105,7 @@ The default publisher type is `log`, which records event metadata only. Redis St
 outbox_publisher_enabled: true
 outbox_publisher_type: redis_stream
 outbox_redis_stream_name: stream:orders
+outbox_processing_timeout_seconds: 900
 ```
 
 The Redis Streams publisher writes `event_id`, `aggregate_type`, `aggregate_id`, `event_type`, `payload`, and `created_at` with `XADD`. Real downstream business side-effect handlers are not implemented yet; see `docs/order-outbox-pattern.md` for the consumer group foundation and future handler design.
@@ -151,7 +155,7 @@ scrape_configs:
       - targets: ["api:8888"]
 ```
 
-Important metric families include HTTP request totals/durations, order placement outcomes, idempotency duplicates, rate-limited orders, insufficient stock conflicts, outbox publish attempts/success/failure, consumer reads/acks/failures, duplicate skips, stale claims, and dead-letter writes. Labels are intentionally bounded to `method`, `path`, `status`, `event_type`, `result`, and `reason`; do not add user IDs, order IDs, event IDs, idempotency keys, or raw Redis keys as labels.
+Important metric families include HTTP request totals/durations, order placement outcomes, idempotency duplicates, rate-limited orders, insufficient stock conflicts, outbox claims, publish attempts/success/failure, finalize failures, consumer reads/acks/failures, duplicate skips, stale claims, and dead-letter writes. Labels are intentionally bounded to `method`, `path`, `status`, `event_type`, `result`, and `reason`; do not add user IDs, order IDs, event IDs, idempotency keys, or raw Redis keys as labels.
 
 ## Permission Model
 
@@ -291,6 +295,7 @@ curl -X PUT http://localhost:8888/api/v1/inventory/<product_id> \
 - Run PostgreSQL and Redis as managed services or hardened containers.
 - Put the API behind TLS at the edge.
 - Expose `/metrics` only to trusted Prometheus scrapers or behind a restricted reverse proxy in production.
+- Let the root process context handle `SIGINT`/`SIGTERM`; HTTP, gRPC, publisher, and consumer loops all exit through the coordinated lifecycle path.
 - Tune order rate limits to match real checkout traffic.
 - Add persistent migrations before using this project for a long-lived production database.
 - Move the auto-migrated `outbox_events` table to explicit migrations before long-lived production use.

@@ -32,6 +32,7 @@ const (
 	DefaultOutboxPublishMaxAttempts          = 3
 	DefaultOutboxPublishRetryBaseSeconds     = 60
 	DefaultOutboxPublishIntervalSeconds      = 30
+	DefaultOutboxProcessingTimeoutSeconds    = 15 * 60
 	OutboxPublisherTypeLog                   = "log"
 	OutboxPublisherTypeRedisStream           = "redis_stream"
 	DefaultOutboxPublisherType               = OutboxPublisherTypeLog
@@ -76,13 +77,14 @@ type Schema struct {
 	OrderRateLimitLimit         int64 `env:"order_rate_limit_limit"`
 	OrderRateLimitWindowSeconds int   `env:"order_rate_limit_window_seconds"`
 
-	OutboxPublisherEnabled        bool   `env:"outbox_publisher_enabled"`
-	OutboxPublisherType           string `env:"outbox_publisher_type"`
-	OutboxRedisStreamName         string `env:"outbox_redis_stream_name"`
-	OutboxPublishBatchSize        int    `env:"outbox_publish_batch_size"`
-	OutboxPublishMaxAttempts      int    `env:"outbox_publish_max_attempts"`
-	OutboxPublishRetryBaseSeconds int    `env:"outbox_publish_retry_base_seconds"`
-	OutboxPublishIntervalSeconds  int    `env:"outbox_publish_interval_seconds"`
+	OutboxPublisherEnabled         bool   `env:"outbox_publisher_enabled"`
+	OutboxPublisherType            string `env:"outbox_publisher_type"`
+	OutboxRedisStreamName          string `env:"outbox_redis_stream_name"`
+	OutboxPublishBatchSize         int    `env:"outbox_publish_batch_size"`
+	OutboxPublishMaxAttempts       int    `env:"outbox_publish_max_attempts"`
+	OutboxPublishRetryBaseSeconds  int    `env:"outbox_publish_retry_base_seconds"`
+	OutboxPublishIntervalSeconds   int    `env:"outbox_publish_interval_seconds"`
+	OutboxProcessingTimeoutSeconds int    `env:"outbox_processing_timeout_seconds"`
 
 	OutboxConsumerEnabled             bool   `env:"outbox_consumer_enabled"`
 	OutboxConsumerGroup               string `env:"outbox_consumer_group"`
@@ -240,6 +242,10 @@ func OutboxPublishRetryBase() time.Duration {
 
 func OutboxPublishInterval() time.Duration {
 	return secondsOrDefault(cfg.OutboxPublishIntervalSeconds, DefaultOutboxPublishIntervalSeconds)
+}
+
+func OutboxProcessingTimeout() time.Duration {
+	return secondsOrDefault(cfg.OutboxProcessingTimeoutSeconds, DefaultOutboxProcessingTimeoutSeconds)
 }
 
 func OutboxConsumerEnabled() bool {

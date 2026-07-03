@@ -1,8 +1,11 @@
 package grpc
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/quangdangfit/gocommon/logger"
 	"github.com/quangdangfit/gocommon/validation"
@@ -43,7 +46,7 @@ func NewServer(validator validation.Validation, db dbs.IDatabase, cache redis.IR
 	}
 }
 
-func (s Server) Run() error {
+func (s Server) Run(ctx context.Context) error {
 	userGRPC.RegisterHandlers(s.engine, s.db, s.validator)
 	cartGRPC.RegisterHandlers(s.engine, s.db, s.validator)
 
@@ -56,10 +59,34 @@ func (s Server) Run() error {
 		return err
 	}
 
-	// Start grpc server
-	err = s.engine.Serve(lis)
-	if err != nil {
-		logger.Fatal("Failed to serve grpc: ", err)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.engine.Serve(lis)
+	}()
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		s.engine.GracefulStop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		s.engine.Stop()
+		<-stopped
+	}
+
+	if err := <-errCh; err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 		return err
 	}
 
