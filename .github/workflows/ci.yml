@@ -80,15 +80,15 @@ jobs:
           if [ -z "$base" ]; then
             base="$(git rev-parse HEAD^)"
           fi
-          files="$(git diff --name-only --diff-filter=ACMR "$base"...HEAD -- '*.go')"
-          if [ -z "$files" ]; then
+          mapfile -t files < <(git diff --name-only --diff-filter=ACMR "$base"...HEAD -- '*.go')
+          if [ "${#files[@]}" -eq 0 ]; then
             exit 0
           fi
-          unformatted="$(gofmt -l $files)"
+          unformatted="$(gofmt -l "${files[@]}")"
           test -z "$unformatted" || { printf '%s\n' "$unformatted"; exit 1; }
 
       - name: Install migration CLI
-        run: go install -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@${MIGRATE_VERSION}
+        run: go install -tags postgres "github.com/golang-migrate/migrate/v4/cmd/migrate@${MIGRATE_VERSION}"
 
       - name: Apply migrations to fresh PostgreSQL
         run: |
@@ -139,7 +139,7 @@ jobs:
           cache: true
 
       - name: Install migration CLI
-        run: go install -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@${MIGRATE_VERSION}
+        run: go install -tags postgres "github.com/golang-migrate/migrate/v4/cmd/migrate@${MIGRATE_VERSION}"
 
       - name: Apply migrations
         run: migrate -path migrations -database "$database_uri" up
