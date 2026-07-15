@@ -2,6 +2,8 @@ package utils
 
 import (
 	"testing"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestHashAndSalt(t *testing.T) {
@@ -26,9 +28,24 @@ func TestHashAndSalt(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := HashAndSalt(tt.args.pass)
+			got, err := HashAndSalt(tt.args.pass)
+			if tt.empty && err == nil {
+				t.Fatal("expected hashing error")
+			}
+			if !tt.empty && err != nil {
+				t.Fatalf("unexpected hashing error: %v", err)
+			}
 			if (got == "") != tt.empty {
 				t.Errorf("HashAndSalt() = %v, args %v", got, tt.args)
+			}
+			if got != "" {
+				cost, err := bcrypt.Cost([]byte(got))
+				if err != nil {
+					t.Fatalf("cannot read bcrypt cost: %v", err)
+				}
+				if cost != bcrypt.DefaultCost {
+					t.Fatalf("bcrypt cost = %d, want %d", cost, bcrypt.DefaultCost)
+				}
 			}
 		})
 	}

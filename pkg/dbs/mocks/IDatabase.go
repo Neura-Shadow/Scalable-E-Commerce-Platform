@@ -174,6 +174,36 @@ func (_m *IDatabase) GetDB() *gorm.DB {
 	return r0
 }
 
+// HasTables provides a mock function with given fields: ctx, tables
+func (_m *IDatabase) HasTables(ctx context.Context, tables []string) error {
+	ret := _m.Called(ctx, tables)
+
+	if rf, ok := ret.Get(0).(func(context.Context, []string) error); ok {
+		return rf(ctx, tables)
+	}
+	return ret.Error(0)
+}
+
+// MigrationReady provides a mock function with given fields: ctx, minimumVersion
+func (_m *IDatabase) MigrationReady(ctx context.Context, minimumVersion uint) error {
+	ret := _m.Called(ctx, minimumVersion)
+
+	if rf, ok := ret.Get(0).(func(context.Context, uint) error); ok {
+		return rf(ctx, minimumVersion)
+	}
+	return ret.Error(0)
+}
+
+// Ping provides a mock function with given fields: ctx
+func (_m *IDatabase) Ping(ctx context.Context) error {
+	ret := _m.Called(ctx)
+
+	if rf, ok := ret.Get(0).(func(context.Context) error); ok {
+		return rf(ctx)
+	}
+	return ret.Error(0)
+}
+
 // Update provides a mock function with given fields: ctx, doc
 func (_m *IDatabase) Update(ctx context.Context, doc interface{}) error {
 	ret := _m.Called(ctx, doc)

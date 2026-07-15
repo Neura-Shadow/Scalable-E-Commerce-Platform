@@ -74,22 +74,18 @@ func (s *InventoryService) AdjustStock(ctx context.Context, productID string, re
 		return nil, err
 	}
 
-	inventory, _, err := s.getOrCreate(ctx, productID)
+	inventory, adjusted, err := s.repo.AdjustStock(ctx, productID, req.QuantityDelta)
 	if err != nil {
 		return nil, err
 	}
-
-	newQuantity := inventory.Quantity + req.QuantityDelta
-	if newQuantity < 0 {
-		return nil, ErrInsufficientStock
+	if adjusted {
+		return inventory, nil
 	}
 
-	inventory.Quantity = newQuantity
-	if err := s.repo.Update(ctx, inventory); err != nil {
+	if _, err := s.getInventory(ctx, productID); err != nil {
 		return nil, err
 	}
-
-	return inventory, nil
+	return nil, ErrInsufficientStock
 }
 
 func (s *InventoryService) ConsumeStock(ctx context.Context, productID string, quantity int64) error {

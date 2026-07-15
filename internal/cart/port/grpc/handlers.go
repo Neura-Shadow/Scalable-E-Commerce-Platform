@@ -8,6 +8,7 @@ import (
 
 	"goshop/internal/cart/dto"
 	"goshop/internal/cart/service"
+	"goshop/pkg/middleware"
 	"goshop/pkg/utils"
 	pb "goshop/proto/gen/go/cart"
 )
@@ -25,7 +26,7 @@ func NewCartHandler(service service.ICartService) *CartHandler {
 }
 
 func (h *CartHandler) AddProduct(ctx context.Context, req *pb.AddProductReq) (*pb.AddProductRes, error) {
-	userID, _ := ctx.Value("userId").(string)
+	userID := middleware.UserIDFromContext(ctx)
 	if userID == "" {
 		return nil, errors.New("unauthorized")
 	}
@@ -48,7 +49,7 @@ func (h *CartHandler) AddProduct(ctx context.Context, req *pb.AddProductReq) (*p
 }
 
 func (h *CartHandler) RemoveProduct(ctx context.Context, req *pb.RemoveProductReq) (*pb.RemoveProductRes, error) {
-	userID, _ := ctx.Value("userId").(string)
+	userID := middleware.UserIDFromContext(ctx)
 	if userID == "" {
 		return nil, errors.New("unauthorized")
 	}
@@ -68,7 +69,7 @@ func (h *CartHandler) RemoveProduct(ctx context.Context, req *pb.RemoveProductRe
 }
 
 func (h *CartHandler) GetCart(ctx context.Context, req *pb.GetCartReq) (*pb.GetCartRes, error) {
-	userID, _ := ctx.Value("userId").(string)
+	userID := middleware.UserIDFromContext(ctx)
 	if userID == "" {
 		return nil, errors.New("unauthorized")
 	}

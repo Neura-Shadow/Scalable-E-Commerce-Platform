@@ -132,10 +132,14 @@ func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderFirstIdempotentReques
 	ctx.Set("userId", "123456")
 	ctx.Request.Header.Set("Idempotency-Key", "checkout-123")
 	req.UserID = "123456"
+	req.IdempotencyKeyHash = orderIdempotencyKeyHash("checkout-123")
+	req.IdempotencyFingerprint = orderRequestFingerprint(req.Lines)
 	cacheKey := orderIdempotencyRedisKey("123456", "checkout-123")
 
 	cache.On("SetNXWithExpiration", cacheKey, mock.MatchedBy(func(record idempotencyRecord) bool {
-		return record.Status == idempotencyStatusProcessing && record.OrderID == ""
+		return record.Status == idempotencyStatusProcessing &&
+			record.OrderID == "" &&
+			record.Fingerprint == req.IdempotencyFingerprint
 	}), time.Hour).Return(true, nil).Times(1)
 	suite.mockService.On("PlaceOrder", mock.Anything, req).
 		Return(&model.Order{
@@ -152,7 +156,9 @@ func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderFirstIdempotentReques
 			},
 		}, nil).Times(1)
 	cache.On("SetWithExpiration", cacheKey, mock.MatchedBy(func(record idempotencyRecord) bool {
-		return record.Status == idempotencyStatusSucceeded && record.OrderID == "orderId1"
+		return record.Status == idempotencyStatusSucceeded &&
+			record.OrderID == "orderId1" &&
+			record.Fingerprint == req.IdempotencyFingerprint
 	}), time.Hour).Return(nil).Times(1)
 
 	handler.PlaceOrder(ctx)
@@ -180,6 +186,7 @@ func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderDuplicateIdempotencyR
 	ctx, writer := suite.prepareContext(req)
 	ctx.Set("userId", "123456")
 	ctx.Request.Header.Set("Idempotency-Key", "checkout-123")
+	fingerprint := orderRequestFingerprint(req.Lines)
 	cacheKey := orderIdempotencyRedisKey("123456", "checkout-123")
 
 	cache.On("SetNXWithExpiration", cacheKey, mock.Anything, time.Hour).Return(false, nil).Times(1)
@@ -188,6 +195,7 @@ func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderDuplicateIdempotencyR
 			record := args.Get(1).(*idempotencyRecord)
 			record.Status = idempotencyStatusSucceeded
 			record.OrderID = "orderId1"
+			record.Fingerprint = fingerprint
 		}).
 		Return(nil).Times(1)
 	suite.mockService.On("GetOrderByID", mock.Anything, "orderId1", "123456").
@@ -216,6 +224,41 @@ func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderDuplicateIdempotencyR
 	suite.NotContains(snapshot, "checkout-123")
 }
 
+func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderRejectsIdempotencyFingerprintMismatch() {
+	req := &dto.PlaceOrderReq{
+		Lines: []dto.PlaceOrderLineReq{{ProductID: "productId1", Quantity: 2}},
+	}
+	cache := redisMocks.NewIRedis(suite.T())
+	handler := NewOrderHandler(
+		suite.mockService,
+		WithOrderCache(cache),
+		WithOrderRateLimit(0, time.Minute),
+		WithOrderIdempotencyTTL(time.Hour),
+	)
+	ctx, writer := suite.prepareContext(req)
+	ctx.Set("userId", "123456")
+	ctx.Request.Header.Set("Idempotency-Key", "checkout-123")
+	cacheKey := orderIdempotencyRedisKey("123456", "checkout-123")
+
+	cache.On("SetNXWithExpiration", cacheKey, mock.Anything, time.Hour).Return(false, nil).Once()
+	cache.On("Get", cacheKey, mock.AnythingOfType("*http.idempotencyRecord")).
+		Run(func(args mock.Arguments) {
+			record := args.Get(1).(*idempotencyRecord)
+			record.Status = idempotencyStatusSucceeded
+			record.OrderID = "orderId1"
+			record.Fingerprint = "different-request"
+		}).
+		Return(nil).Once()
+
+	handler.PlaceOrder(ctx)
+
+	var res map[string]map[string]string
+	_ = json.Unmarshal(writer.Body.Bytes(), &res)
+	suite.Equal(http.StatusConflict, writer.Code)
+	suite.Equal("Idempotency key conflict", res["error"]["message"])
+	suite.mockService.AssertNotCalled(suite.T(), "PlaceOrder", mock.Anything, mock.Anything)
+}
+
 func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderDuplicateIdempotencyInFlightReturnsConflict() {
 	appMetrics.ResetForTest()
 	req := &dto.PlaceOrderReq{
@@ -236,6 +279,7 @@ func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderDuplicateIdempotencyI
 	ctx, writer := suite.prepareContext(req)
 	ctx.Set("userId", "123456")
 	ctx.Request.Header.Set("Idempotency-Key", "checkout-123")
+	fingerprint := orderRequestFingerprint(req.Lines)
 	cacheKey := orderIdempotencyRedisKey("123456", "checkout-123")
 
 	cache.On("SetNXWithExpiration", cacheKey, mock.Anything, time.Hour).Return(false, nil).Times(1)
@@ -243,6 +287,7 @@ func (suite *OrderHandlerTestSuite) TestOrderAPI_PlaceOrderDuplicateIdempotencyI
 		Run(func(args mock.Arguments) {
 			record := args.Get(1).(*idempotencyRecord)
 			record.Status = idempotencyStatusProcessing
+			record.Fingerprint = fingerprint
 		}).
 		Return(nil).Times(1)
 

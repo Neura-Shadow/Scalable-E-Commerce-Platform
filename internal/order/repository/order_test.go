@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/quangdangfit/gocommon/logger"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
@@ -49,7 +50,7 @@ func (suite *OrderRepositoryTestSuite) TestCreateOrderSuccessfully() {
 	suite.mockDB.On("CreateInBatches", mock.Anything, mock.Anything, len(orderLines)).
 		Return(nil).Times(1)
 
-	order, err := suite.repo.CreateOrder(context.Background(), userID, orderLines)
+	order, err := suite.repo.CreateOrder(context.Background(), &model.Order{UserID: userID}, orderLines)
 	suite.NotNil(order)
 	suite.Nil(err)
 }
@@ -69,7 +70,7 @@ func (suite *OrderRepositoryTestSuite) TestCreateOrderRollbackOnLineCreateFail()
 	suite.mockDB.On("CreateInBatches", mock.Anything, mock.Anything, len(orderLines)).
 		Return(expectedErr).Times(1)
 
-	order, err := suite.repo.CreateOrder(context.Background(), userID, orderLines)
+	order, err := suite.repo.CreateOrder(context.Background(), &model.Order{UserID: userID}, orderLines)
 	suite.Nil(order)
 	suite.ErrorIs(err, expectedErr)
 }
@@ -87,9 +88,23 @@ func (suite *OrderRepositoryTestSuite) TestCreateOrderFail() {
 	suite.mockDB.On("Create", mock.Anything, mock.AnythingOfType("*model.Order")).
 		Return(expectedErr).Times(1)
 
-	order, err := suite.repo.CreateOrder(context.Background(), userID, orderLines)
+	order, err := suite.repo.CreateOrder(context.Background(), &model.Order{UserID: userID}, orderLines)
 	suite.Nil(order)
 	suite.ErrorIs(err, expectedErr)
+}
+
+func (suite *OrderRepositoryTestSuite) TestCreateOrderMapsIdempotencyUniqueViolation() {
+	duplicate := &pgconn.PgError{Code: "23505", ConstraintName: "idx_orders_user_idempotency_key"}
+	suite.mockDB.On("Create", mock.Anything, mock.AnythingOfType("*model.Order")).Return(duplicate).Once()
+
+	order, err := suite.repo.CreateOrder(
+		context.Background(),
+		&model.Order{UserID: "userID"},
+		[]*model.OrderLine{{ProductID: "productID", Quantity: 1}},
+	)
+
+	suite.Nil(order)
+	suite.ErrorIs(err, model.ErrIdempotencyDuplicate)
 }
 
 // UpdateOrder

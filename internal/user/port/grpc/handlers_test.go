@@ -13,6 +13,7 @@ import (
 	"goshop/internal/user/model"
 	"goshop/internal/user/service/mocks"
 	"goshop/pkg/config"
+	"goshop/pkg/middleware"
 	pb "goshop/proto/gen/go/user"
 )
 
@@ -126,7 +127,7 @@ func (suite *UserHandlerTestSuite) TestUserAPI_RegisterFail() {
 
 func (suite *UserHandlerTestSuite) TestUserAPI_GetMeSuccess() {
 	userId := "123456"
-	ctx := context.WithValue(context.Background(), "userId", userId)
+	ctx := middleware.ContextWithUserID(context.Background(), userId)
 
 	suite.mockService.On("GetUserByID", mock.Anything, userId).
 		Return(
@@ -152,7 +153,7 @@ func (suite *UserHandlerTestSuite) TestUserAPI_GetMeUnauthorized() {
 
 func (suite *UserHandlerTestSuite) TestUserAPI_GetMeFail() {
 	userId := "123456"
-	ctx := context.WithValue(context.Background(), "userId", userId)
+	ctx := middleware.ContextWithUserID(context.Background(), userId)
 
 	suite.mockService.On("GetUserByID", mock.Anything, "123456").
 		Return(nil, errors.New("error")).Times(1)
@@ -167,9 +168,10 @@ func (suite *UserHandlerTestSuite) TestUserAPI_GetMeFail() {
 
 func (suite *UserHandlerTestSuite) TestUserAPI_RefreshTokenSuccess() {
 	userId := "123456"
-	ctx := context.WithValue(context.Background(), "userId", userId)
+	ctx := middleware.ContextWithUserID(context.Background(), userId)
+	ctx = middleware.ContextWithTokenVersion(ctx, 0)
 
-	suite.mockService.On("RefreshToken", mock.Anything, userId).
+	suite.mockService.On("RefreshToken", mock.Anything, userId, uint64(0)).
 		Return("access-token", nil).Times(1)
 
 	res, err := suite.handler.RefreshToken(ctx, &pb.RefreshTokenReq{})
@@ -185,9 +187,10 @@ func (suite *UserHandlerTestSuite) TestUserAPI_RefreshTokenUnauthorized() {
 
 func (suite *UserHandlerTestSuite) TestUserAPI_RefreshTokenFail() {
 	userId := "123456"
-	ctx := context.WithValue(context.Background(), "userId", userId)
+	ctx := middleware.ContextWithUserID(context.Background(), userId)
+	ctx = middleware.ContextWithTokenVersion(ctx, 0)
 
-	suite.mockService.On("RefreshToken", mock.Anything, "123456").
+	suite.mockService.On("RefreshToken", mock.Anything, "123456", uint64(0)).
 		Return("", errors.New("error")).Times(1)
 
 	res, err := suite.handler.RefreshToken(ctx, &pb.RefreshTokenReq{})
@@ -205,7 +208,7 @@ func (suite *UserHandlerTestSuite) TestUserAPI_ChangePasswordSuccess() {
 	}
 
 	userId := "123456"
-	ctx := context.WithValue(context.Background(), "userId", userId)
+	ctx := middleware.ContextWithUserID(context.Background(), userId)
 
 	suite.mockService.On("ChangePassword", mock.Anything, userId, &dto.ChangePasswordReq{
 		Password:    req.Password,
@@ -230,7 +233,7 @@ func (suite *UserHandlerTestSuite) TestUserAPI_ChangePasswordFail() {
 	}
 
 	userId := "123456"
-	ctx := context.WithValue(context.Background(), "userId", userId)
+	ctx := middleware.ContextWithUserID(context.Background(), userId)
 
 	suite.mockService.On("ChangePassword", mock.Anything, "123456", &dto.ChangePasswordReq{
 		Password:    req.Password,

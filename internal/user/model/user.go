@@ -17,18 +17,23 @@ const (
 )
 
 type User struct {
-	ID        string     `json:"id" gorm:"unique;not null;index;primary_key"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
-	DeletedAt *time.Time `json:"deleted_at" gorm:"index"`
-	Email     string     `json:"email" gorm:"unique;not null;index:idx_user_email"`
-	Password  string     `json:"password"`
-	Role      UserRole   `json:"role"`
+	ID           string     `json:"id" gorm:"unique;not null;index;primary_key"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	DeletedAt    *time.Time `json:"deleted_at" gorm:"index"`
+	Email        string     `json:"email" gorm:"unique;not null;index:idx_user_email"`
+	Password     string     `json:"-"`
+	Role         UserRole   `json:"role"`
+	TokenVersion uint64     `json:"-" gorm:"not null;default:0"`
 }
 
 func (user *User) BeforeCreate(tx *gorm.DB) error {
 	user.ID = uuid.New().String()
-	user.Password = utils.HashAndSalt([]byte(user.Password))
+	hashedPassword, err := utils.HashAndSalt([]byte(user.Password))
+	if err != nil {
+		return err
+	}
+	user.Password = hashedPassword
 	if user.Role == "" {
 		user.Role = UserRoleCustomer
 	}

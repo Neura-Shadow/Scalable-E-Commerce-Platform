@@ -466,6 +466,34 @@ func TestProductAPI_UpdateProductSuccess(t *testing.T) {
 	assert.Equal(t, float64(1), res.Price)
 }
 
+func TestProductAPI_UpdateProductForbiddenForCustomer(t *testing.T) {
+	u := userModel.User{
+		Email:    "customer-product-update@test.com",
+		Password: "test123456",
+		Role:     userModel.UserRoleCustomer,
+	}
+	dbTest.Create(context.Background(), &u)
+
+	p := model.Product{
+		Name:        "test-product-update-forbidden",
+		Description: "test-product-update-forbidden",
+		Price:       1,
+	}
+	dbTest.Create(context.Background(), &p)
+	defer cleanData(&u, &p)
+
+	writer := makeRequest(
+		"PUT",
+		fmt.Sprintf("/api/v1/products/%s", p.ID),
+		&dto.UpdateProductReq{Name: "must-not-change"},
+		tokenForUser(&u),
+	)
+	var response map[string]map[string]string
+	_ = json.Unmarshal(writer.Body.Bytes(), &response)
+	assert.Equal(t, http.StatusForbidden, writer.Code)
+	assert.Equal(t, "Permission denied", response["error"]["message"])
+}
+
 func TestProductAPI_UpdateProductInvalidFieldType(t *testing.T) {
 	defer cleanData()
 

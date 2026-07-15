@@ -8,19 +8,20 @@ import (
 )
 
 type Cart struct {
-	ID        string     `json:"id" gorm:"unique;not null;index;primary_key"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
-	DeletedAt *time.Time `json:"deleted_at" gorm:"index"`
-	UserID    string     `json:"user_id" gorm:"unique;not null;index"`
-	User      *User
-	Lines     []*CartLine `json:"lines"`
+	ID        string      `json:"id" gorm:"primaryKey"`
+	CreatedAt time.Time   `json:"created_at"`
+	UpdatedAt time.Time   `json:"updated_at"`
+	DeletedAt *time.Time  `json:"deleted_at" gorm:"index"`
+	UserID    string      `json:"user_id" gorm:"not null;uniqueIndex:idx_cart_user"`
+	User      *User       `gorm:"foreignKey:UserID;references:ID"`
+	Lines     []*CartLine `json:"lines" gorm:"foreignKey:CartID;references:ID"`
 }
 
 type CartLine struct {
-	ProductID string `json:"product_id"`
-	Product   *Product
-	Quantity  uint `json:"quantity"`
+	CartID    string   `json:"cart_id" gorm:"primaryKey"`
+	ProductID string   `json:"product_id" gorm:"primaryKey"`
+	Product   *Product `gorm:"foreignKey:ProductID;references:ID"`
+	Quantity  uint     `json:"quantity"`
 }
 
 func (cart *Cart) BeforeCreate(tx *gorm.DB) error {

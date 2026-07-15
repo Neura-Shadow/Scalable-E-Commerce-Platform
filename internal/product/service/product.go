@@ -9,6 +9,7 @@ import (
 	"goshop/internal/product/dto"
 	"goshop/internal/product/model"
 	"goshop/internal/product/repository"
+	"goshop/pkg/money"
 	"goshop/pkg/paging"
 	"goshop/pkg/utils"
 )
@@ -58,6 +59,9 @@ func (p *ProductService) Create(ctx context.Context, req *dto.CreateProductReq) 
 	if err := p.validator.ValidateStruct(req); err != nil {
 		return nil, err
 	}
+	if _, err := money.ToMinorUnits(req.Price); err != nil {
+		return nil, err
+	}
 
 	var product model.Product
 	utils.Copy(&product, req)
@@ -74,6 +78,11 @@ func (p *ProductService) Create(ctx context.Context, req *dto.CreateProductReq) 
 func (p *ProductService) Update(ctx context.Context, id string, req *dto.UpdateProductReq) (*model.Product, error) {
 	if err := p.validator.ValidateStruct(req); err != nil {
 		return nil, err
+	}
+	if req.Price != 0 {
+		if _, err := money.ToMinorUnits(req.Price); err != nil {
+			return nil, err
+		}
 	}
 
 	product, err := p.repo.GetProductByID(ctx, id)

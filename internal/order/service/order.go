@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"errors"
+	"math"
 	"sort"
 
 	"github.com/quangdangfit/gocommon/validation"
@@ -9,6 +11,7 @@ import (
 	"goshop/internal/order/dto"
 	"goshop/internal/order/model"
 	appMetrics "goshop/pkg/metrics"
+	"goshop/pkg/money"
 	"goshop/pkg/paging"
 	"goshop/pkg/utils"
 )
@@ -45,16 +48,10 @@ func NewOrderService(
 	repo OrderRepository,
 	productRepo ProductRepository,
 	inventory InventoryService,
-	transactors ...Transactor,
+	transactor Transactor,
 ) *OrderService {
-	uow := staticUnitOfWork{
-		orders:    repo,
-		products:  productRepo,
-		inventory: inventory,
-	}
-	transactor := Transactor(passthroughTransactor{uow: uow})
-	if len(transactors) > 0 && transactors[0] != nil {
-		transactor = transactors[0]
+	if transactor == nil {
+		panic("order transactor is required")
 	}
 
 	return &OrderService{
@@ -67,32 +64,70 @@ func NewOrderService(
 }
 
 func (s *OrderService) PlaceOrder(ctx context.Context, req *dto.PlaceOrderReq) (*model.Order, error) {
+	if err := validateOrderQuantities(req.Lines); err != nil {
+		return nil, err
+	}
 	if err := s.validator.ValidateStruct(req); err != nil {
 		return nil, err
 	}
+	if req.IdempotencyKeyHash != "" || req.IdempotencyFingerprint != "" {
+		if req.IdempotencyKeyHash == "" || req.IdempotencyFingerprint == "" {
+			return nil, model.ErrIdempotencyConflict
+		}
+		if existing, err := s.replayIdempotentOrder(ctx, req); !errors.Is(err, model.ErrOrderNotFound) {
+			return existing, err
+		}
+	}
 
 	var order *model.Order
+	var outboxCreated bool
 	err := s.transactor.WithinTransaction(ctx, func(uow UnitOfWork) error {
 		var lines []*model.OrderLine
 		utils.Copy(&lines, &req.Lines)
 
 		productMap := make(map[string]*model.Product, len(lines))
+		var totalMinorUnits int64
 		for _, line := range lines {
 			product, err := uow.Products().GetProductByID(ctx, line.ProductID)
 			if err != nil {
 				return err
 			}
-			line.Price = product.Price * float64(line.Quantity)
+			unitPrice, err := money.ToMinorUnits(product.Price)
+			if err != nil {
+				return model.ErrInvalidOrderAmount
+			}
+			lineTotal, err := money.Multiply(unitPrice, line.Quantity)
+			if err != nil {
+				return model.ErrInvalidOrderAmount
+			}
+			totalMinorUnits, err = money.Add(totalMinorUnits, lineTotal)
+			if err != nil {
+				return model.ErrInvalidOrderAmount
+			}
+			line.Price = money.FromMinorUnits(lineTotal)
 			productMap[line.ProductID] = product
 		}
 
-		for _, item := range stockConsumptionPlan(lines) {
+		plan, err := stockConsumptionPlan(lines)
+		if err != nil {
+			return err
+		}
+		for _, item := range plan {
 			if err := uow.Inventory().ConsumeStock(ctx, item.productID, item.quantity); err != nil {
 				return err
 			}
 		}
 
-		created, err := uow.Orders().CreateOrder(ctx, req.UserID, lines)
+		createdOrder := &model.Order{
+			UserID:     req.UserID,
+			TotalPrice: money.FromMinorUnits(totalMinorUnits),
+		}
+		if req.IdempotencyKeyHash != "" {
+			createdOrder.IdempotencyKey = &req.IdempotencyKeyHash
+			createdOrder.IdempotencyFingerprint = &req.IdempotencyFingerprint
+		}
+
+		created, err := uow.Orders().CreateOrder(ctx, createdOrder, lines)
 		if err != nil {
 			return err
 		}
@@ -105,17 +140,35 @@ func (s *OrderService) PlaceOrder(ctx context.Context, req *dto.PlaceOrderReq) (
 			if _, err := outbox.CreatePending(ctx, orderAggregateType, created.ID, OrderCreatedEventType, buildOrderCreatedPayload(created)); err != nil {
 				return err
 			}
-			appMetrics.RecordOutboxEventCreated(OrderCreatedEventType)
+			outboxCreated = true
 		}
 
 		order = created
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, model.ErrIdempotencyDuplicate) {
+			return s.replayIdempotentOrder(ctx, req)
+		}
 		return nil, err
+	}
+	if outboxCreated {
+		appMetrics.RecordOutboxEventCreated(OrderCreatedEventType)
 	}
 
 	return order, nil
+}
+
+func (s *OrderService) replayIdempotentOrder(ctx context.Context, req *dto.PlaceOrderReq) (*model.Order, error) {
+	existing, err := s.repo.GetOrderByIdempotencyKey(ctx, req.UserID, req.IdempotencyKeyHash)
+	if err != nil {
+		return nil, err
+	}
+	if existing.IdempotencyFingerprint == nil || *existing.IdempotencyFingerprint != req.IdempotencyFingerprint {
+		return nil, model.ErrIdempotencyConflict
+	}
+	existing.IdempotencyReplay = true
+	return existing, nil
 }
 
 type stockConsumption struct {
@@ -123,10 +176,26 @@ type stockConsumption struct {
 	quantity  int64
 }
 
-func stockConsumptionPlan(lines []*model.OrderLine) []stockConsumption {
+func validateOrderQuantities(lines []dto.PlaceOrderLineReq) error {
+	for _, line := range lines {
+		if line.Quantity == 0 || line.Quantity > dto.MaxOrderLineQuantity {
+			return model.ErrInvalidOrderQuantity
+		}
+	}
+	return nil
+}
+
+func stockConsumptionPlan(lines []*model.OrderLine) ([]stockConsumption, error) {
 	quantities := make(map[string]int64, len(lines))
 	for _, line := range lines {
-		quantities[line.ProductID] += int64(line.Quantity)
+		if uint64(line.Quantity) > math.MaxInt64 {
+			return nil, model.ErrInvalidOrderQuantity
+		}
+		quantity := int64(line.Quantity)
+		if quantities[line.ProductID] > math.MaxInt64-quantity {
+			return nil, model.ErrInvalidOrderQuantity
+		}
+		quantities[line.ProductID] += quantity
 	}
 
 	productIDs := make([]string, 0, len(quantities))
@@ -142,7 +211,7 @@ func stockConsumptionPlan(lines []*model.OrderLine) []stockConsumption {
 			quantity:  quantities[productID],
 		})
 	}
-	return plan
+	return plan, nil
 }
 
 type staticUnitOfWork struct {
@@ -232,18 +301,21 @@ func (s *OrderService) CancelOrder(ctx context.Context, orderID, userID string) 
 		if existingOrder.Status == model.OrderStatusDone || existingOrder.Status == model.OrderStatusCancelled {
 			return model.ErrInvalidOrderState
 		}
+		if err := uow.Orders().CancelOrderIfCancellable(ctx, orderID, userID); err != nil {
+			return err
+		}
 
-		for _, line := range existingOrder.Lines {
-			if err := uow.Inventory().Restock(ctx, line.ProductID, int64(line.Quantity)); err != nil {
+		restockPlan, err := stockConsumptionPlan(existingOrder.Lines)
+		if err != nil {
+			return err
+		}
+		for _, item := range restockPlan {
+			if err := uow.Inventory().Restock(ctx, item.productID, item.quantity); err != nil {
 				return err
 			}
 		}
 
 		existingOrder.Status = model.OrderStatusCancelled
-		if err := uow.Orders().UpdateOrder(ctx, existingOrder); err != nil {
-			return err
-		}
-
 		order = existingOrder
 		return nil
 	})

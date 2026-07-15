@@ -2,7 +2,11 @@ package repository
 
 import (
 	"context"
+	"errors"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
 	"goshop/internal/order/dto"
@@ -28,21 +32,42 @@ func NewOrderRepository(db dbs.IDatabase) *OrderRepo {
 	return &OrderRepo{db: db}
 }
 
-func (r *OrderRepo) CreateOrder(ctx context.Context, userID string, lines []*model.OrderLine) (*model.Order, error) {
-	order := new(model.Order)
-
-	var totalPrice float64
-	for _, line := range lines {
-		totalPrice += line.Price
-	}
-	order.TotalPrice = totalPrice
-	order.UserID = userID
-
+func (r *OrderRepo) CreateOrder(ctx context.Context, order *model.Order, lines []*model.OrderLine) (*model.Order, error) {
 	if err := r.createOrder(ctx, r.db, order, lines); err != nil {
+		if isIdempotencyUniqueViolation(err) {
+			return nil, model.ErrIdempotencyDuplicate
+		}
 		return nil, err
 	}
 
 	return order, nil
+}
+
+func (r *OrderRepo) GetOrderByIdempotencyKey(ctx context.Context, userID, keyHash string) (*model.Order, error) {
+	var order model.Order
+	err := r.db.FindOne(
+		ctx,
+		&order,
+		dbs.WithPreload([]string{"Lines", "Lines.Product"}),
+		dbs.WithQuery(
+			dbs.NewQuery("user_id = ?", userID),
+			dbs.NewQuery("idempotency_key = ?", keyHash),
+		),
+	)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, model.ErrOrderNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &order, nil
+}
+
+func isIdempotencyUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) &&
+		pgErr.Code == "23505" &&
+		pgErr.ConstraintName == "idx_orders_user_idempotency_key"
 }
 
 func (r *OrderRepo) createOrder(ctx context.Context, tx dbs.IDatabase, order *model.Order, lines []*model.OrderLine) error {
@@ -121,4 +146,27 @@ func orderListOrder(orderBy string, desc bool) clause.OrderByColumn {
 
 func (r *OrderRepo) UpdateOrder(ctx context.Context, order *model.Order) error {
 	return r.db.Update(ctx, order)
+}
+
+func (r *OrderRepo) CancelOrderIfCancellable(ctx context.Context, orderID, userID string) error {
+	ctx, cancel := context.WithTimeout(ctx, dbs.DatabaseTimeout)
+	defer cancel()
+
+	result := r.db.GetDB().WithContext(ctx).
+		Model(&model.Order{}).
+		Where("id = ? AND user_id = ? AND status IN ?", orderID, userID, []model.OrderStatus{
+			model.OrderStatusNew,
+			model.OrderStatusInProgress,
+		}).
+		Updates(map[string]any{
+			"status":     model.OrderStatusCancelled,
+			"updated_at": time.Now(),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return model.ErrInvalidOrderState
+	}
+	return nil
 }

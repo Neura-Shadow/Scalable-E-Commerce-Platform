@@ -4,6 +4,8 @@ import (
 	"goshop/pkg/paging"
 )
 
+const MaxOrderLineQuantity uint = 1_000_000
+
 type Order struct {
 	ID         string       `json:"id"`
 	Code       string       `json:"code"`
@@ -19,13 +21,15 @@ type OrderLine struct {
 }
 
 type PlaceOrderReq struct {
-	UserID string              `json:"user_id" validate:"required"`
-	Lines  []PlaceOrderLineReq `json:"lines,omitempty" validate:"required,gt=0,lte=5,dive"`
+	UserID                 string              `json:"user_id" validate:"required"`
+	IdempotencyKeyHash     string              `json:"-"`
+	IdempotencyFingerprint string              `json:"-"`
+	Lines                  []PlaceOrderLineReq `json:"lines,omitempty" validate:"required,gt=0,lte=5,dive"`
 }
 
 type PlaceOrderLineReq struct {
 	ProductID string `json:"product_id,omitempty" validate:"required"`
-	Quantity  uint   `json:"quantity,omitempty" validate:"required"`
+	Quantity  uint   `json:"quantity,omitempty" validate:"required,lte=1000000"`
 }
 
 type ListOrderReq struct {

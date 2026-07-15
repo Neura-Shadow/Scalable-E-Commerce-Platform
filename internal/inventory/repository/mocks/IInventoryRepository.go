@@ -93,6 +93,33 @@ func (_m *IInventoryRepository) Update(ctx context.Context, inventory *model.Inv
 	return r0
 }
 
+func (_m *IInventoryRepository) AdjustStock(ctx context.Context, productID string, quantityDelta int64) (*model.Inventory, bool, error) {
+	ret := _m.Called(ctx, productID, quantityDelta)
+
+	var r0 *model.Inventory
+	if rf, ok := ret.Get(0).(func(context.Context, string, int64) *model.Inventory); ok {
+		r0 = rf(ctx, productID, quantityDelta)
+	} else if ret.Get(0) != nil {
+		r0 = ret.Get(0).(*model.Inventory)
+	}
+
+	var r1 bool
+	if rf, ok := ret.Get(1).(func(context.Context, string, int64) bool); ok {
+		r1 = rf(ctx, productID, quantityDelta)
+	} else {
+		r1 = ret.Bool(1)
+	}
+
+	var r2 error
+	if rf, ok := ret.Get(2).(func(context.Context, string, int64) error); ok {
+		r2 = rf(ctx, productID, quantityDelta)
+	} else {
+		r2 = ret.Error(2)
+	}
+
+	return r0, r1, r2
+}
+
 func (_m *IInventoryRepository) ConsumeStock(ctx context.Context, productID string, quantity int64) (bool, error) {
 	ret := _m.Called(ctx, productID, quantity)
 

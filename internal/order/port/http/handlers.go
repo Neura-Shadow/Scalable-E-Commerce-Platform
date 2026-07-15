@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -81,8 +83,9 @@ func NewOrderHandler(service orderService, opts ...OrderHandlerOption) *OrderHan
 }
 
 type idempotencyRecord struct {
-	Status  string `json:"status"`
-	OrderID string `json:"order_id,omitempty"`
+	Status      string `json:"status"`
+	OrderID     string `json:"order_id,omitempty"`
+	Fingerprint string `json:"fingerprint"`
 }
 
 // PlaceOrder godoc
@@ -122,7 +125,13 @@ func (a *OrderHandler) PlaceOrder(c *gin.Context) {
 	}
 
 	idempotencyKey := strings.TrimSpace(c.GetHeader(idempotencyHeader))
-	cacheKey, acquired, handled, handledReason := a.beginIdempotentOrder(c, req.UserID, idempotencyKey)
+	fingerprint := ""
+	if idempotencyKey != "" {
+		req.IdempotencyKeyHash = orderIdempotencyKeyHash(idempotencyKey)
+		req.IdempotencyFingerprint = orderRequestFingerprint(req.Lines)
+		fingerprint = req.IdempotencyFingerprint
+	}
+	cacheKey, acquired, handled, handledReason := a.beginIdempotentOrder(c, req.UserID, idempotencyKey, fingerprint)
 	if handled {
 		if strings.HasPrefix(handledReason, "duplicate_") {
 			logger.Errorf("order_place_idempotency_duplicate user_id=%s latency_ms=%d", req.UserID, time.Since(startedAt).Milliseconds())
@@ -150,21 +159,29 @@ func (a *OrderHandler) PlaceOrder(c *gin.Context) {
 		return
 	}
 
-	a.completeIdempotentOrder(cacheKey, order.ID)
-	recordOrderPlaceMetric("success", "created", startedAt)
+	a.completeIdempotentOrder(cacheKey, order.ID, fingerprint)
+	if order.IdempotencyReplay {
+		appMetrics.RecordOrderIdempotencyDuplicate("durable_replay")
+		recordOrderPlaceMetric("duplicate", "durable_replay", startedAt)
+	} else {
+		recordOrderPlaceMetric("success", "created", startedAt)
+	}
 
 	var res dto.Order
 	utils.Copy(&res, &order)
 	response.JSON(c, http.StatusOK, res)
 }
 
-func (a *OrderHandler) beginIdempotentOrder(c *gin.Context, userID, idempotencyKey string) (string, bool, bool, string) {
+func (a *OrderHandler) beginIdempotentOrder(c *gin.Context, userID, idempotencyKey, fingerprint string) (string, bool, bool, string) {
 	if a.cache == nil || idempotencyKey == "" {
 		return "", false, false, ""
 	}
 
 	cacheKey := orderIdempotencyRedisKey(userID, idempotencyKey)
-	acquired, err := a.cache.SetNXWithExpiration(cacheKey, idempotencyRecord{Status: idempotencyStatusProcessing}, a.idempotencyTTL)
+	acquired, err := a.cache.SetNXWithExpiration(cacheKey, idempotencyRecord{
+		Status:      idempotencyStatusProcessing,
+		Fingerprint: fingerprint,
+	}, a.idempotencyTTL)
 	if err != nil {
 		logger.Errorf("order_place_idempotency_start_failed user_id=%s error=%s", userID, err)
 		response.Error(c, http.StatusInternalServerError, err, "Something went wrong")
@@ -180,6 +197,11 @@ func (a *OrderHandler) beginIdempotentOrder(c *gin.Context, userID, idempotencyK
 		response.Error(c, http.StatusConflict, err, "Duplicate request")
 		appMetrics.RecordOrderIdempotencyDuplicate("lookup_failed")
 		return cacheKey, false, true, "duplicate_lookup_failed"
+	}
+	if record.Fingerprint != fingerprint {
+		response.Error(c, http.StatusConflict, model.ErrIdempotencyConflict, "Idempotency key conflict")
+		appMetrics.RecordOrderIdempotencyDuplicate("fingerprint_mismatch")
+		return cacheKey, false, true, "duplicate_fingerprint_mismatch"
 	}
 
 	if record.Status != idempotencyStatusSucceeded || record.OrderID == "" {
@@ -203,14 +225,14 @@ func (a *OrderHandler) beginIdempotentOrder(c *gin.Context, userID, idempotencyK
 	return cacheKey, false, true, "duplicate_replay"
 }
 
-func (a *OrderHandler) completeIdempotentOrder(cacheKey, orderID string) {
+func (a *OrderHandler) completeIdempotentOrder(cacheKey, orderID, fingerprint string) {
 	if a.cache == nil || cacheKey == "" || orderID == "" {
 		return
 	}
 
 	err := a.cache.SetWithExpiration(
 		cacheKey,
-		idempotencyRecord{Status: idempotencyStatusSucceeded, OrderID: orderID},
+		idempotencyRecord{Status: idempotencyStatusSucceeded, OrderID: orderID, Fingerprint: fingerprint},
 		a.idempotencyTTL,
 	)
 	if err != nil {
@@ -247,6 +269,15 @@ func (a *OrderHandler) allowOrderPlacement(c *gin.Context, userID string) bool {
 }
 
 func orderPlacementErrorResponse(err error) (int, string) {
+	if errors.Is(err, model.ErrInvalidOrderQuantity) {
+		return http.StatusBadRequest, "Invalid quantity"
+	}
+	if errors.Is(err, model.ErrInvalidOrderAmount) {
+		return http.StatusBadRequest, "Invalid order amount"
+	}
+	if errors.Is(err, model.ErrIdempotencyConflict) {
+		return http.StatusConflict, "Idempotency key conflict"
+	}
 	if errors.Is(err, inventoryService.ErrInsufficientStock) {
 		return http.StatusConflict, "Insufficient stock"
 	}
@@ -255,6 +286,15 @@ func orderPlacementErrorResponse(err error) (int, string) {
 }
 
 func orderPlacementMetricReason(err error) string {
+	if errors.Is(err, model.ErrInvalidOrderQuantity) {
+		return "invalid_quantity"
+	}
+	if errors.Is(err, model.ErrInvalidOrderAmount) {
+		return "invalid_amount"
+	}
+	if errors.Is(err, model.ErrIdempotencyConflict) {
+		return "idempotency_conflict"
+	}
 	if errors.Is(err, inventoryService.ErrInsufficientStock) {
 		return "insufficient_stock"
 	}
@@ -277,8 +317,25 @@ func recordOrderPlaceMetric(result, reason string, startedAt time.Time) {
 }
 
 func orderIdempotencyRedisKey(userID, idempotencyKey string) string {
+	return fmt.Sprintf("idempotency:orders:%s:%s", userID, orderIdempotencyKeyHash(idempotencyKey))
+}
+
+func orderIdempotencyKeyHash(idempotencyKey string) string {
 	sum := sha256.Sum256([]byte(idempotencyKey))
-	return fmt.Sprintf("idempotency:orders:%s:%s", userID, hex.EncodeToString(sum[:]))
+	return hex.EncodeToString(sum[:])
+}
+
+func orderRequestFingerprint(lines []dto.PlaceOrderLineReq) string {
+	canonical := append([]dto.PlaceOrderLineReq(nil), lines...)
+	sort.Slice(canonical, func(i, j int) bool {
+		if canonical[i].ProductID == canonical[j].ProductID {
+			return canonical[i].Quantity < canonical[j].Quantity
+		}
+		return canonical[i].ProductID < canonical[j].ProductID
+	})
+	encoded, _ := json.Marshal(canonical)
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:])
 }
 
 func orderRateLimitRedisKey(userID string) string {
@@ -385,6 +442,10 @@ func (a *OrderHandler) CancelOrder(c *gin.Context) {
 		logger.Errorf("Failed to cancel order, id: %s, error: %s", orderID, err)
 		if errors.Is(err, model.ErrPermissionDenied) {
 			response.Error(c, http.StatusForbidden, err, "Permission denied")
+			return
+		}
+		if errors.Is(err, model.ErrInvalidOrderState) {
+			response.Error(c, http.StatusConflict, err, "Invalid order state")
 			return
 		}
 		response.Error(c, http.StatusInternalServerError, err, "Something went wrong")

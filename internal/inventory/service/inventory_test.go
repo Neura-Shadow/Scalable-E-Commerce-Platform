@@ -39,12 +39,28 @@ func TestInventoryServiceAdjustStockInsufficient(t *testing.T) {
 	repo := &repoMocks.IInventoryRepository{}
 	svc := NewInventoryService(validator, repo)
 
+	repo.On("AdjustStock", mock.Anything, "product", int64(-2)).Return(nil, false, nil).Once()
 	repo.On("GetByProductID", mock.Anything, "product").Return(&model.Inventory{ProductID: "product", Quantity: 1}, nil).Once()
 
 	res, err := svc.AdjustStock(context.Background(), "product", &dto.AdjustInventoryReq{QuantityDelta: -2})
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrInsufficientStock))
 	require.Nil(t, res)
+	repo.AssertExpectations(t)
+}
+
+func TestInventoryServiceAdjustStockReturnsAtomicRepositoryResult(t *testing.T) {
+	validator := validation.New()
+	repo := &repoMocks.IInventoryRepository{}
+	svc := NewInventoryService(validator, repo)
+	expected := &model.Inventory{ProductID: "product", Quantity: 4}
+
+	repo.On("AdjustStock", mock.Anything, "product", int64(3)).Return(expected, true, nil).Once()
+
+	res, err := svc.AdjustStock(context.Background(), "product", &dto.AdjustInventoryReq{QuantityDelta: 3})
+	require.NoError(t, err)
+	require.Same(t, expected, res)
+	repo.AssertNotCalled(t, "GetByProductID", mock.Anything, mock.Anything)
 	repo.AssertExpectations(t)
 }
 
