@@ -1,204 +1,118 @@
 # Load Testing
 
-This project can be load-tested with any HTTP load generator. The examples below use `hey` because it is small and easy to install.
+The reproducible k6 entry point is `loadtest/k6/release-smoke.js`. It targets k6 v2.0.0 and defines eight independent scenarios.
 
-## Setup
+| Scenario | k6 name | Purpose |
+| --- | --- | --- |
+| Product list | `product-list` | Versioned list-cache and query path |
+| Product detail | `product-detail` | Exact product cache key |
+| Normal order | `normal-order` | Successful checkout path |
+| Limited stock | `limited-stock` | Concurrent conflicts and nonnegative stock |
+| Idempotency retry | `idempotency` | Same key returns the same order |
+| Rate limit | `rate-limit` | Expected `429` behavior |
+| Outbox publisher | `outbox-publisher` | Publisher metric/error observation |
+| Redis consumer | `redis-consumer` | Consumer failure and DLQ observation |
 
-Start dependencies and the API:
+## Required environment
+
+```text
+BASE_URL
+CUSTOMER_TOKEN
+ADMIN_TOKEN
+PRODUCT_ID
+EXPECTED_STOCK
+VUS
+DURATION
+```
+
+Order scenarios also accept separate `NORMAL_ORDER_PRODUCT_ID`, `LIMITED_PRODUCT_ID`, `IDEMPOTENCY_PRODUCT_ID`, and `RATE_LIMIT_PRODUCT_ID`. Use separate seeded products when scenarios run together so a normal-order scenario cannot consume the limited-stock fixture. Tokens are runtime inputs and must never be committed.
+
+Optional gates:
+
+```text
+SCENARIOS
+EXPECT_CONFLICTS
+P95_MS
+P99_MS
+```
+
+The default `SCENARIOS=product-list,product-detail` is a non-mutating smoke. `SCENARIOS=all` enables all eight scenarios.
+
+## Run with Docker
+
+Start the application profile and seed users, products, and inventory first. From the repository root:
 
 ```bash
-docker compose -f docker-compose.yml up -d
-go run cmd/api/main.go
+docker run --rm \
+  -v "$PWD:/work:ro" \
+  -w /work \
+  -e BASE_URL=http://host.docker.internal:8888 \
+  -e PRODUCT_ID="$PRODUCT_ID" \
+  -e CUSTOMER_TOKEN="$CUSTOMER_TOKEN" \
+  -e ADMIN_TOKEN="$ADMIN_TOKEN" \
+  -e VUS=1 \
+  -e DURATION=5s \
+  -e SCENARIOS=product-list,product-detail \
+  grafana/k6:2.0.0@sha256:a33a0cfdc4d2483d6b7a3a22e726a499ff2831a671a49239104cd34a9937523c run loadtest/k6/release-smoke.js
 ```
 
-The outbox background publisher is disabled by default. To include Redis Streams publishing in a local load run, set:
-
-```yaml
-outbox_publisher_enabled: true
-outbox_publisher_type: redis_stream
-outbox_redis_stream_name: stream:orders
-outbox_processing_timeout_seconds: 900
-```
-
-To include the consumer group foundation in the same local run, also set:
-
-```yaml
-outbox_consumer_enabled: true
-outbox_consumer_group: order-events
-outbox_consumer_name: local-consumer-1
-outbox_consumer_batch_size: 10
-outbox_consumer_block_seconds: 5
-outbox_consumer_processed_ttl_seconds: 86400
-outbox_consumer_claim_min_idle_seconds: 60
-outbox_consumer_claim_batch_size: 10
-outbox_consumer_max_delivery_attempts: 5
-outbox_consumer_failure_ttl_seconds: 86400
-outbox_dead_letter_stream_name: stream:orders:dead_letter
-```
-
-Metrics are available by default during load runs:
-
-```yaml
-metrics_enabled: true
-metrics_path: /metrics
-```
-
-Create or seed:
-
-- one customer account
-- one admin account
-- one product
-- inventory for the product
-- a customer JWT access token
-
-## Normal order placement
+Example limited-stock gate:
 
 ```bash
-hey -n 200 -c 20 \
-  -m POST \
-  -H "Authorization: Bearer ${CUSTOMER_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"lines":[{"product_id":"'"${PRODUCT_ID}"'","quantity":1}]}' \
-  http://localhost:8888/api/v1/orders
+docker run --rm \
+  -v "$PWD:/work:ro" \
+  -w /work \
+  -e BASE_URL=http://host.docker.internal:8888 \
+  -e PRODUCT_ID="$LIMITED_PRODUCT_ID" \
+  -e LIMITED_PRODUCT_ID="$LIMITED_PRODUCT_ID" \
+  -e CUSTOMER_TOKEN="$CUSTOMER_TOKEN" \
+  -e ADMIN_TOKEN="$ADMIN_TOKEN" \
+  -e EXPECTED_STOCK=10 \
+  -e EXPECT_CONFLICTS=true \
+  -e VUS=20 \
+  -e DURATION=10s \
+  -e SCENARIOS=limited-stock \
+  grafana/k6:2.0.0@sha256:a33a0cfdc4d2483d6b7a3a22e726a499ff2831a671a49239104cd34a9937523c run loadtest/k6/release-smoke.js
 ```
 
-Track:
+## Built-in thresholds
 
-- success count
-- conflict count
-- p95 latency
-- p99 latency
-- final stock
+- zero transport failures and unexpected 5xx responses
+- p95 and p99 HTTP latency below configurable smoke baselines
+- successful limited-stock orders exactly equal seeded stock
+- zero observed negative stock
+- expected conflicts when their explicit gate is enabled
+- at least one `429` whenever the `rate-limit` scenario is selected
+- zero idempotency response mismatch
+- zero observed outbox claim/finalize/publish failure samples
+- zero consumer failure or DLQ-growth samples
 
-## Concurrent limited-stock ordering
+Expected `409` and `429` responses count as `http_req_failed` in k6's built-in metric. Use the custom safe-status checks and counters to distinguish those intentional outcomes from unexpected failures.
 
-Set inventory to a small number, for example `10`, then run more concurrent requests than available stock.
+## External measurements
 
-Expected result:
+k6 cannot directly prove every database and Redis invariant. For an accepted run, record these from isolated infrastructure before and after the scenario:
 
-- exactly `10` successful orders
-- remaining requests fail with conflict or another safe non-2xx response
-- final stock is `0`
-- final stock is never negative
-
-The automated regression is:
-
-```bash
-go test ./test/http -run TestOrderAPI_ConcurrentOrdersNeverOversell -count=5 -timeout 180s
-```
-
-## Idempotent retries
-
-Send the same request repeatedly with the same user token and `Idempotency-Key`:
-
-```bash
-hey -n 20 -c 5 \
-  -m POST \
-  -H "Authorization: Bearer ${CUSTOMER_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: checkout-load-test-1" \
-  -d '{"lines":[{"product_id":"'"${PRODUCT_ID}"'","quantity":1}]}' \
-  http://localhost:8888/api/v1/orders
-```
-
-Expected result:
-
-- one order is created for that user/key pair
-- duplicate successful responses return the same order
-- in-flight duplicates may return `409 Conflict`
-
-## Rate limit behavior
-
-Use a high request count against `POST /orders`.
-
-Expected result:
-
-- successful requests while below the per-user window limit
-- `429 Too Many Requests` after the configured limit
-- no duplicate orders caused by retries
-
-## Metrics to record
-
-At minimum, record:
-
-- total requests
-- success count
-- conflict count
-- rate-limited count
-- p95 latency
-- p99 latency
-- final stock quantity
-- order count for the tested user
-- p95/p99 order latency from `order_place_duration_seconds`
-- HTTP p95/p99 latency from `http_request_duration_seconds`
-- idempotency duplicate count
-- rate-limited request count
-- outbox claim/finalize failure counts
-- outbox publish success/failure counts
-- consumer failure and dead-letter counts
-
-The final stock quantity must never be negative.
-
-Example latency and error queries:
-
-```promql
-histogram_quantile(0.95, sum(rate(order_place_duration_seconds_bucket[5m])) by (le))
-histogram_quantile(0.99, sum(rate(order_place_duration_seconds_bucket[5m])) by (le))
-histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, path))
-sum(rate(order_place_failed_total[5m])) by (reason)
-sum(rate(order_rate_limited_total[5m])) by (reason)
-```
-
-A starting load-test gate is zero 5xx responses, zero negative stock observations, exactly the expected successful order count for the seeded stock, and no sustained p99 regression against the previous accepted run.
-
-## Optional outbox publisher check
-
-When Redis Streams publishing is enabled during a load run, successful orders should eventually create entries in the configured stream and mark their outbox rows as `published`. The publisher first claims due rows as `processing` in a short DB transaction, publishes outside that transaction, and finalizes each row afterward. Rows stuck in `processing` longer than `outbox_processing_timeout_seconds` are eligible for a later claim. When the consumer foundation is also enabled, messages should be read with `XREADGROUP`, skipped if `processed:events:{eventID}` already exists, and acknowledged with `XACK` after the metadata-only handler succeeds. Repeated handler failures are counted with `consumer:failures:{stream}:{group}:{eventID}`, expire after `outbox_consumer_failure_ttl_seconds`, and route to `stream:orders:dead_letter` after the configured max attempts. Invalid messages are dead-lettered instead of being retried forever. Originals are acknowledged only after the dead-letter write succeeds.
+- PostgreSQL pool usage, locks, slow queries, pending/processing/dead-letter outbox rows
+- Redis command latency, stream length, consumer pending count, and DLQ length
+- final inventory and successful order count
+- API/container CPU and memory
 
 Useful checks:
 
+```sql
+SELECT quantity FROM inventories WHERE product_id = '<limited-product-id>';
+SELECT count(*) FROM order_lines WHERE product_id = '<limited-product-id>';
+SELECT status, count(*) FROM outbox_events GROUP BY status;
+```
+
 ```bash
 redis-cli XLEN stream:orders
-redis-cli XRANGE stream:orders - + COUNT 10
-redis-cli XINFO STREAM stream:orders
-redis-cli XINFO GROUPS stream:orders
-redis-cli XINFO CONSUMERS stream:orders order-events
 redis-cli XPENDING stream:orders order-events
 redis-cli XLEN stream:orders:dead_letter
-redis-cli XRANGE stream:orders:dead_letter - + COUNT 10
 curl -s http://localhost:8888/metrics
 ```
 
-Track:
+Record hardware, replicas, database/Redis settings, dataset size, VUs, duration, RPS/TPS, p50/p95/p99, 4xx/5xx, pool usage, Redis latency, outbox state, final stock, and the observed bottleneck in `docs/benchmark-report-v1.md`.
 
-- stream length growth
-- DB rows stuck in `processing`
-- outbox claim/finalize failures
-- outbox publish failure count
-- dead-letter count
-- publisher batch latency
-- oldest pending outbox row age
-- Redis consumer group pending count
-- stale messages claimed with `XAUTOCLAIM`
-- duplicate event IDs skipped
-- dead-letter stream growth rate
-- `outbox_claim_failure_total`
-- `outbox_finalize_failure_total`
-- `outbox_publish_failure_total`
-- `outbox_consumer_failure_total`
-- `outbox_consumer_dead_letter_total`
-
-This repository does not yet include real downstream business side effects. Future consumer group load tests should keep group `order-events`, process messages idempotently by `event_id`, acknowledge after side effects commit, and alert on unexpected growth in `stream:orders:dead_letter`.
-
-Dashboard panels worth watching during load tests:
-
-- order placement rate
-- order error rate
-- p95/p99 order latency
-- idempotency duplicate count
-- rate-limited requests
-- outbox publish success/failure
-- consumer pending/dead-letter behavior
-- DLQ growth
-
-Keep metrics labels bounded to `method`, `path`, `status`, `event_type`, `result`, and `reason`. Do not add user IDs, order IDs, event IDs, idempotency keys, or raw Redis keys.
+The short local runs in that report validate script and safety behavior only. They do not establish sustained capacity, multi-replica scaling, or national-scale performance.

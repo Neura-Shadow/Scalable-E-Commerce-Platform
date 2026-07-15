@@ -1,5 +1,5 @@
 CREATE TABLE IF NOT EXISTS outbox_events (
-  id UUID PRIMARY KEY,
+  id TEXT PRIMARY KEY,
   aggregate_type TEXT NOT NULL,
   aggregate_id TEXT NOT NULL,
   event_type TEXT NOT NULL,
@@ -25,7 +25,7 @@ CREATE INDEX IF NOT EXISTS idx_outbox_events_processing_locked_at
   ON outbox_events (locked_at)
   WHERE status = 'processing';
 
-CREATE INDEX IF NOT EXISTS idx_outbox_events_aggregate
+CREATE INDEX IF NOT EXISTS idx_outbox_aggregate
   ON outbox_events (aggregate_type, aggregate_id);
 
 CREATE INDEX IF NOT EXISTS idx_outbox_events_event_type

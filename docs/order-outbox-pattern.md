@@ -45,9 +45,9 @@ Example table shape:
 
 ```sql
 CREATE TABLE outbox_events (
-  id UUID PRIMARY KEY,
+  id TEXT PRIMARY KEY,
   aggregate_type TEXT NOT NULL,
-  aggregate_id UUID NOT NULL,
+  aggregate_id TEXT NOT NULL,
   event_type TEXT NOT NULL,
   payload JSONB NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',
@@ -204,6 +204,8 @@ The current consumer foundation:
 - claims stale pending messages with `XAUTOCLAIM`
 - logs metadata only and does not log payload contents
 
+Failure increments and first-key expiration execute atomically in one Redis Lua operation. The retry window cannot become permanent because a process failed between separate `INCR` and `EXPIRE` calls.
+
 The built-in handler is intentionally a metadata-only log/no-op handler. It provides a safe framework for future side-effect handlers without sending emails, starting fulfillment, authorizing payments, or writing analytics yet.
 
 ## Idempotent consumers
@@ -312,7 +314,7 @@ Prometheus labels for outbox and consumer metrics are bounded to `event_type`, `
 
 ## Migration note
 
-The current application uses GORM `AutoMigrate`, and `cmd/api/main.go` includes `OutboxEvent` in that startup migration list. For a long-lived production database, move the outbox table to explicit reviewed migrations before running multiple production instances. Use `docs/migrations/outbox_events.sql` as the production migration reference.
+`migrations/000001_initial_schema.up.sql` is the authoritative outbox schema. It includes `pending`, `processing`, `published`, and `dead_letter` status validation; `locked_at`; `locked_by`; the due-pending partial index; and the stale-processing partial index. Production requires `database_auto_migrate=false` and applies the reviewed migration before API rollout. `docs/migrations/outbox_events.sql` is retained only as a readable reference and must not replace the versioned migration workflow.
 
 ## Reliability benefit
 
