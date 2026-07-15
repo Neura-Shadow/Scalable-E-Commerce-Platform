@@ -1,0 +1,6 @@
+DROP TABLE IF EXISTS outbox_events;
+DROP TABLE IF EXISTS order_lines;
+DROP TABLE IF EXISTS orders;
+DROP TABLE IF EXISTS inventories;
+DROP TABLE IF EXISTS products;
+DROP TABLE IF EXISTS users;

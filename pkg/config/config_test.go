@@ -1,10 +1,52 @@
 package config
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
+
+func TestDatabaseConfigDefaults(t *testing.T) {
+	previous := cfg
+	cfg = Schema{}
+	t.Cleanup(func() { cfg = previous })
+
+	assert.False(t, DatabaseAutoMigrate())
+	assert.Equal(t, DefaultDatabaseMaxOpenConns, DatabaseMaxOpenConns())
+	assert.Equal(t, DefaultDatabaseMaxIdleConns, DatabaseMaxIdleConns())
+	assert.Equal(t, time.Duration(DefaultDatabaseConnMaxLifetimeSeconds)*time.Second, DatabaseConnMaxLifetime())
+	assert.Equal(t, time.Duration(DefaultDatabaseConnMaxIdleTimeSeconds)*time.Second, DatabaseConnMaxIdleTime())
+}
+
+func TestValidateConfigRejectsDatabaseIdleConnectionsAboveOpenConnections(t *testing.T) {
+	err := Validate(Schema{
+		Environment:          DevelopmentEnv,
+		DatabaseMaxOpenConns: 10,
+		DatabaseMaxIdleConns: 11,
+	})
+
+	assert.ErrorContains(t, err, "database_max_idle_conns")
+}
+
+func TestValidateConfigRejectsNegativeDatabasePoolValues(t *testing.T) {
+	tests := []struct {
+		name   string
+		config Schema
+	}{
+		{name: "max open", config: Schema{Environment: DevelopmentEnv, DatabaseMaxOpenConns: -1}},
+		{name: "max idle", config: Schema{Environment: DevelopmentEnv, DatabaseMaxIdleConns: -1}},
+		{name: "max lifetime", config: Schema{Environment: DevelopmentEnv, DatabaseConnMaxLifetimeSeconds: -1}},
+		{name: "max idle time", config: Schema{Environment: DevelopmentEnv, DatabaseConnMaxIdleTimeSeconds: -1}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Error(t, Validate(tt.config))
+		})
+	}
+}
 
 func TestOutboxPublisherConfigDefaults(t *testing.T) {
 	previousPublisherType := cfg.OutboxPublisherType
@@ -77,7 +119,7 @@ func TestOutboxConsumerConfigDefaults(t *testing.T) {
 func TestMetricsConfigDefaults(t *testing.T) {
 	previousEnabled := cfg.MetricsEnabled
 	previousPath := cfg.MetricsPath
-	cfg.MetricsEnabled = nil
+	cfg.MetricsEnabled = ""
 	cfg.MetricsPath = ""
 	t.Cleanup(func() {
 		cfg.MetricsEnabled = previousEnabled
@@ -90,8 +132,7 @@ func TestMetricsConfigDefaults(t *testing.T) {
 
 func TestMetricsConfigCanBeDisabled(t *testing.T) {
 	previousEnabled := cfg.MetricsEnabled
-	disabled := false
-	cfg.MetricsEnabled = &disabled
+	cfg.MetricsEnabled = "false"
 	t.Cleanup(func() {
 		cfg.MetricsEnabled = previousEnabled
 	})
@@ -99,8 +140,75 @@ func TestMetricsConfigCanBeDisabled(t *testing.T) {
 	assert.False(t, MetricsEnabled())
 }
 
+func TestMetricsDefaultsToDisabledInProduction(t *testing.T) {
+	previous := cfg
+	cfg = Schema{Environment: ProductionEnv}
+	t.Cleanup(func() { cfg = previous })
+
+	assert.False(t, MetricsEnabled())
+}
+
+func TestGRPCReflectionDefaultsToDisabledInProduction(t *testing.T) {
+	previous := cfg
+	cfg = Schema{Environment: ProductionEnv}
+	t.Cleanup(func() { cfg = previous })
+
+	assert.False(t, GRPCReflectionEnabled())
+}
+
+func TestGRPCReflectionDefaultsToEnabledOutsideProduction(t *testing.T) {
+	previous := cfg
+	cfg = Schema{Environment: DevelopmentEnv}
+	t.Cleanup(func() { cfg = previous })
+
+	assert.True(t, GRPCReflectionEnabled())
+}
+
+func TestGRPCReflectionCanBeExplicitlyEnabled(t *testing.T) {
+	previous := cfg
+	cfg = Schema{Environment: ProductionEnv, GRPCReflectionEnabled: "true"}
+	t.Cleanup(func() { cfg = previous })
+
+	assert.True(t, GRPCReflectionEnabled())
+}
+
+func TestSwaggerDefaultsToDisabledInProduction(t *testing.T) {
+	previous := cfg
+	cfg = Schema{Environment: ProductionEnv}
+	t.Cleanup(func() { cfg = previous })
+
+	assert.False(t, SwaggerEnabled())
+}
+
+func TestSwaggerDefaultsToEnabledOutsideProduction(t *testing.T) {
+	previous := cfg
+	cfg = Schema{Environment: DevelopmentEnv}
+	t.Cleanup(func() { cfg = previous })
+
+	assert.True(t, SwaggerEnabled())
+}
+
+func TestSwaggerCanBeExplicitlyEnabled(t *testing.T) {
+	previous := cfg
+	cfg = Schema{Environment: ProductionEnv, SwaggerEnabled: "true"}
+	t.Cleanup(func() { cfg = previous })
+
+	assert.True(t, SwaggerEnabled())
+}
+
+func TestValidateConfigRejectsInvalidOptionalBooleans(t *testing.T) {
+	assert.Error(t, Validate(Schema{Environment: DevelopmentEnv, MetricsEnabled: "sometimes"}))
+	assert.Error(t, Validate(Schema{Environment: DevelopmentEnv, GRPCReflectionEnabled: "sometimes"}))
+	assert.Error(t, Validate(Schema{Environment: DevelopmentEnv, SwaggerEnabled: "sometimes"}))
+}
+
+func TestValidateConfigRejectsUnknownOrEmptyEnvironment(t *testing.T) {
+	assert.ErrorContains(t, Validate(Schema{}), "environment")
+	assert.ErrorContains(t, Validate(Schema{Environment: "prodution"}), "environment")
+}
+
 func TestValidateConfigRejectsProductionPlaceholderAuthSecret(t *testing.T) {
-	err := validateConfig(Schema{
+	err := Validate(Schema{
 		Environment: ProductionEnv,
 		AuthSecret:  "auth_secret",
 	})
@@ -109,8 +217,8 @@ func TestValidateConfigRejectsProductionPlaceholderAuthSecret(t *testing.T) {
 }
 
 func TestValidateConfigAllowsDevelopmentPlaceholderAuthSecret(t *testing.T) {
-	err := validateConfig(Schema{
-		Environment: "development",
+	err := Validate(Schema{
+		Environment: DevelopmentEnv,
 		AuthSecret:  "auth_secret",
 	})
 
@@ -118,10 +226,55 @@ func TestValidateConfigAllowsDevelopmentPlaceholderAuthSecret(t *testing.T) {
 }
 
 func TestValidateConfigAllowsProductionNonPlaceholderAuthSecret(t *testing.T) {
-	err := validateConfig(Schema{
+	err := Validate(Schema{
 		Environment: ProductionEnv,
-		AuthSecret:  "replace-with-a-random-secret",
+		HttpPort:    8888,
+		GrpcPort:    8889,
+		AuthSecret:  strings.Repeat("test-only-", 4),
+		DatabaseURI: "postgres://configured",
+		RedisURI:    "redis:6379",
 	})
 
 	assert.NoError(t, err)
+}
+
+func TestValidateConfigRejectsShortProductionAuthSecret(t *testing.T) {
+	err := Validate(Schema{
+		Environment: ProductionEnv,
+		HttpPort:    8888,
+		GrpcPort:    8889,
+		AuthSecret:  "short-but-not-placeholder",
+		DatabaseURI: "postgres://configured",
+		RedisURI:    "redis:6379",
+	})
+
+	assert.ErrorContains(t, err, "at least 32 bytes")
+}
+
+func TestValidateConfigRejectsMissingProductionDependencies(t *testing.T) {
+	base := Schema{
+		Environment: ProductionEnv,
+		HttpPort:    8888,
+		GrpcPort:    8889,
+		AuthSecret:  strings.Repeat("test-only-", 4),
+		DatabaseURI: "postgres://configured",
+		RedisURI:    "redis:6379",
+	}
+	tests := []struct {
+		name   string
+		modify func(*Schema)
+	}{
+		{name: "HTTP port", modify: func(cfg *Schema) { cfg.HttpPort = 0 }},
+		{name: "gRPC port", modify: func(cfg *Schema) { cfg.GrpcPort = 0 }},
+		{name: "database URI", modify: func(cfg *Schema) { cfg.DatabaseURI = "" }},
+		{name: "Redis URI", modify: func(cfg *Schema) { cfg.RedisURI = "" }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate := base
+			tt.modify(&candidate)
+			assert.Error(t, Validate(candidate))
+		})
+	}
 }

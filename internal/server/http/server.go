@@ -30,15 +30,36 @@ import (
 	appMetrics "goshop/pkg/metrics"
 	"goshop/pkg/middleware"
 	"goshop/pkg/redis"
-	"goshop/pkg/response"
 )
 
 type Server struct {
-	engine    *gin.Engine
-	cfg       *config.Schema
-	validator validation.Validation
-	db        dbs.IDatabase
-	cache     redis.IRedis
+	engine           *gin.Engine
+	cfg              *config.Schema
+	validator        validation.Validation
+	db               dbs.IDatabase
+	cache            redis.IRedis
+	readinessTimeout time.Duration
+}
+
+const (
+	defaultReadinessTimeout = 750 * time.Millisecond
+	minimumMigrationVersion = 5
+)
+
+var requiredReadinessTables = []string{
+	"users",
+	"products",
+	"inventories",
+	"orders",
+	"order_lines",
+	"outbox_events",
+	"carts",
+	"cart_lines",
+}
+
+type readinessResponse struct {
+	Status     string            `json:"status"`
+	Components map[string]string `json:"components"`
 }
 
 type backgroundStopFunc func() error
@@ -53,29 +74,28 @@ type consumerRunner interface {
 }
 
 func NewServer(validator validation.Validation, db dbs.IDatabase, cache redis.IRedis) *Server {
+	if config.GetConfig().Environment == config.ProductionEnv {
+		gin.SetMode(gin.ReleaseMode)
+	}
 	engine := gin.Default()
 	_ = engine.SetTrustedProxies(nil)
 	engine.Use(middleware.MaxBodyBytes(config.MaxRequestBodyBytes()))
 	engine.Use(middleware.HTTPMetrics())
 
 	return &Server{
-		engine:    engine,
-		cfg:       config.GetConfig(),
-		validator: validator,
-		db:        db,
-		cache:     cache,
+		engine:           engine,
+		cfg:              config.GetConfig(),
+		validator:        validator,
+		db:               db,
+		cache:            cache,
+		readinessTimeout: defaultReadinessTimeout,
 	}
 }
 
 func (s Server) Run(ctx context.Context) error {
-	if s.cfg.Environment == config.ProductionEnv {
-		gin.SetMode(gin.ReleaseMode)
-	}
-
 	if err := s.MapRoutes(); err != nil {
 		return fmt.Errorf("map HTTP routes: %w", err)
 	}
-	s.engine.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 	stopOutboxPublisher, err := s.startOutboxPublisher(ctx)
 	if err != nil {
 		return err
@@ -129,9 +149,12 @@ func (s Server) GetEngine() *gin.Engine {
 }
 
 func (s Server) MapRoutes() error {
-	s.engine.GET("/health", func(c *gin.Context) {
-		response.JSON(c, http.StatusOK, nil)
-	})
+	s.engine.GET("/livez", s.liveness)
+	s.engine.GET("/health", s.liveness)
+	s.engine.GET("/readyz", s.readiness)
+	if config.SwaggerEnabled() {
+		s.engine.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+	}
 	if config.MetricsEnabled() {
 		s.engine.GET(config.MetricsPath(), gin.WrapH(appMetrics.Handler()))
 	}
@@ -141,6 +164,49 @@ func (s Server) MapRoutes() error {
 	orderHttp.Routes(v1, s.newOrderService(), s.cache)
 	inventoryHttp.Routes(v1, s.db, s.validator)
 	return nil
+}
+
+func (s Server) liveness(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"status": "alive"})
+}
+
+func (s Server) readiness(c *gin.Context) {
+	components := map[string]string{
+		"configuration": "unavailable",
+		"postgres":      "unavailable",
+		"redis":         "unavailable",
+	}
+
+	if s.cfg != nil && config.Validate(*s.cfg) == nil {
+		components["configuration"] = "ready"
+	}
+
+	postgresCtx, cancelPostgres := context.WithTimeout(c.Request.Context(), s.readinessTimeout)
+	postgresReady := s.db != nil && s.db.Ping(postgresCtx) == nil && s.db.HasTables(postgresCtx, requiredReadinessTables) == nil
+	if postgresReady && s.cfg != nil && !s.cfg.DatabaseAutoMigrate {
+		postgresReady = s.db.MigrationReady(postgresCtx, minimumMigrationVersion) == nil
+	}
+	if postgresReady {
+		components["postgres"] = "ready"
+	}
+	cancelPostgres()
+
+	redisCtx, cancelRedis := context.WithTimeout(c.Request.Context(), s.readinessTimeout)
+	if s.cache != nil && s.cache.Ping(redisCtx) == nil {
+		components["redis"] = "ready"
+	}
+	cancelRedis()
+
+	statusCode := http.StatusOK
+	status := "ready"
+	for _, component := range components {
+		if component != "ready" {
+			statusCode = http.StatusServiceUnavailable
+			status = "unavailable"
+			break
+		}
+	}
+	c.JSON(statusCode, readinessResponse{Status: status, Components: components})
 }
 
 func (s Server) newHTTPServer() *http.Server {

@@ -1,9 +1,16 @@
-environment: production
+environment: development
 http_port: 8888
 grpc_port: 8889
-auth_secret: ######
+grpc_reflection_enabled: false
+swagger_enabled: true
+auth_secret: local-dev-secret
 
 database_uri: postgres://username:password@host:5432/database
+database_auto_migrate: false
+database_max_open_conns: 25
+database_max_idle_conns: 5
+database_conn_max_lifetime_seconds: 300
+database_conn_max_idle_time_seconds: 60
 
 redis_uri: localhost:6379
 redis_password:

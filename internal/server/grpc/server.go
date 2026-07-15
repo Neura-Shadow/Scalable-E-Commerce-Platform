@@ -13,11 +13,14 @@ import (
 	"google.golang.org/grpc/reflection"
 
 	cartGRPC "goshop/internal/cart/port/grpc"
+	cartRepository "goshop/internal/cart/repository"
+	cartService "goshop/internal/cart/service"
 	userGRPC "goshop/internal/user/port/grpc"
 	"goshop/pkg/config"
 	"goshop/pkg/dbs"
 	"goshop/pkg/middleware"
 	"goshop/pkg/redis"
+	userPB "goshop/proto/gen/go/user"
 )
 
 type Server struct {
@@ -29,7 +32,15 @@ type Server struct {
 }
 
 func NewServer(validator validation.Validation, db dbs.IDatabase, cache redis.IRedis) *Server {
-	interceptor := middleware.NewAuthInterceptor(config.AuthIgnoreMethods)
+	interceptor := middleware.NewAuthInterceptor(
+		[]string{
+			userPB.UserService_Login_FullMethodName,
+			userPB.UserService_Register_FullMethodName,
+		},
+		middleware.WithRefreshTokenMethods([]string{
+			userPB.UserService_RefreshToken_FullMethodName,
+		}),
+	)
 
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(
@@ -48,9 +59,13 @@ func NewServer(validator validation.Validation, db dbs.IDatabase, cache redis.IR
 
 func (s Server) Run(ctx context.Context) error {
 	userGRPC.RegisterHandlers(s.engine, s.db, s.validator)
-	cartGRPC.RegisterHandlers(s.engine, s.db, s.validator)
+	cartRepo := cartRepository.NewCartRepository(s.db)
+	cartSvc := cartService.NewCartService(s.validator, cartRepo)
+	cartGRPC.RegisterHandlers(s.engine, cartSvc)
 
-	reflection.Register(s.engine)
+	if config.GRPCReflectionEnabled() {
+		reflection.Register(s.engine)
+	}
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", s.cfg.GrpcPort))
 	logger.Info("GRPC server is listening on PORT: ", s.cfg.GrpcPort)

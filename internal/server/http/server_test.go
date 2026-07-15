@@ -2,9 +2,11 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -68,6 +70,178 @@ func TestServer_HealthRoute(t *testing.T) {
 	writer := httptest.NewRecorder()
 	server.GetEngine().ServeHTTP(writer, req)
 	assert.Equal(t, http.StatusOK, writer.Code)
+}
+
+func TestServer_LivezDoesNotDependOnPostgresOrRedis(t *testing.T) {
+	mockDB := dbMocks.NewIDatabase(t)
+	mockRedis := redisMocks.NewIRedis(t)
+	server := NewServer(validation.New(), mockDB, mockRedis)
+	require.NoError(t, server.MapRoutes())
+
+	response := performHealthRequest(server, "/livez")
+
+	assert.Equal(t, http.StatusOK, response.Code)
+	assert.JSONEq(t, `{"status":"alive"}`, response.Body.String())
+}
+
+func TestServer_HealthRemainsALivezAlias(t *testing.T) {
+	mockDB := dbMocks.NewIDatabase(t)
+	mockRedis := redisMocks.NewIRedis(t)
+	server := NewServer(validation.New(), mockDB, mockRedis)
+	require.NoError(t, server.MapRoutes())
+
+	health := performHealthRequest(server, "/health")
+	livez := performHealthRequest(server, "/livez")
+
+	assert.Equal(t, livez.Code, health.Code)
+	assert.JSONEq(t, livez.Body.String(), health.Body.String())
+}
+
+func TestServer_ReadyzSucceedsWhenDependenciesAndConfigurationAreReady(t *testing.T) {
+	withReadyConfiguration(t)
+	mockDB := dbMocks.NewIDatabase(t)
+	mockRedis := redisMocks.NewIRedis(t)
+	mockDB.On("Ping", mock.Anything).Return(nil).Once()
+	mockDB.On("HasTables", mock.Anything, requiredReadinessTables).Return(nil).Once()
+	mockDB.On("MigrationReady", mock.Anything, uint(minimumMigrationVersion)).Return(nil).Once()
+	mockRedis.On("Ping", mock.Anything).Return(nil).Once()
+	server := NewServer(validation.New(), mockDB, mockRedis)
+	require.NoError(t, server.MapRoutes())
+
+	response := performHealthRequest(server, "/readyz")
+
+	assert.Equal(t, http.StatusOK, response.Code)
+	assert.Equal(t, readinessResponse{
+		Status: "ready",
+		Components: map[string]string{
+			"configuration": "ready",
+			"postgres":      "ready",
+			"redis":         "ready",
+		},
+	}, decodeReadinessResponse(t, response))
+}
+
+func TestServer_ReadyzFailsWithoutPostgresAndDoesNotLeakErrors(t *testing.T) {
+	withReadyConfiguration(t)
+	mockDB := dbMocks.NewIDatabase(t)
+	mockRedis := redisMocks.NewIRedis(t)
+	mockDB.On("Ping", mock.Anything).Return(errors.New("postgres://user:password@private-host/database")).Once()
+	mockRedis.On("Ping", mock.Anything).Return(nil).Once()
+	server := NewServer(validation.New(), mockDB, mockRedis)
+	require.NoError(t, server.MapRoutes())
+
+	response := performHealthRequest(server, "/readyz")
+
+	assert.Equal(t, http.StatusServiceUnavailable, response.Code)
+	assert.Equal(t, "unavailable", decodeReadinessResponse(t, response).Components["postgres"])
+	assert.NotContains(t, response.Body.String(), "password")
+	assert.NotContains(t, response.Body.String(), "private-host")
+}
+
+func TestServer_ReadyzFailsWithoutRequiredSchema(t *testing.T) {
+	withReadyConfiguration(t)
+	mockDB := dbMocks.NewIDatabase(t)
+	mockRedis := redisMocks.NewIRedis(t)
+	mockDB.On("Ping", mock.Anything).Return(nil).Once()
+	mockDB.On("HasTables", mock.Anything, requiredReadinessTables).Return(errors.New("missing orders table")).Once()
+	mockRedis.On("Ping", mock.Anything).Return(nil).Once()
+	server := NewServer(validation.New(), mockDB, mockRedis)
+	require.NoError(t, server.MapRoutes())
+
+	response := performHealthRequest(server, "/readyz")
+
+	assert.Equal(t, http.StatusServiceUnavailable, response.Code)
+	assert.Equal(t, "unavailable", decodeReadinessResponse(t, response).Components["postgres"])
+	assert.NotContains(t, response.Body.String(), "orders")
+}
+
+func TestServer_ReadyzFailsWhenMigrationStateIsNotCurrent(t *testing.T) {
+	withReadyConfiguration(t)
+	mockDB := dbMocks.NewIDatabase(t)
+	mockRedis := redisMocks.NewIRedis(t)
+	mockDB.On("Ping", mock.Anything).Return(nil).Once()
+	mockDB.On("HasTables", mock.Anything, requiredReadinessTables).Return(nil).Once()
+	mockDB.On("MigrationReady", mock.Anything, uint(minimumMigrationVersion)).Return(errors.New("migration is dirty")).Once()
+	mockRedis.On("Ping", mock.Anything).Return(nil).Once()
+	server := NewServer(validation.New(), mockDB, mockRedis)
+	require.NoError(t, server.MapRoutes())
+
+	response := performHealthRequest(server, "/readyz")
+
+	assert.Equal(t, http.StatusServiceUnavailable, response.Code)
+	assert.Equal(t, "unavailable", decodeReadinessResponse(t, response).Components["postgres"])
+	assert.NotContains(t, response.Body.String(), "dirty")
+}
+
+func TestServer_ReadyzFailsWithoutRedis(t *testing.T) {
+	withReadyConfiguration(t)
+	mockDB := dbMocks.NewIDatabase(t)
+	mockRedis := redisMocks.NewIRedis(t)
+	mockDB.On("Ping", mock.Anything).Return(nil).Once()
+	mockDB.On("HasTables", mock.Anything, requiredReadinessTables).Return(nil).Once()
+	mockDB.On("MigrationReady", mock.Anything, uint(minimumMigrationVersion)).Return(nil).Once()
+	mockRedis.On("Ping", mock.Anything).Return(errors.New("redis password leaked")).Once()
+	server := NewServer(validation.New(), mockDB, mockRedis)
+	require.NoError(t, server.MapRoutes())
+
+	response := performHealthRequest(server, "/readyz")
+
+	assert.Equal(t, http.StatusServiceUnavailable, response.Code)
+	assert.Equal(t, "unavailable", decodeReadinessResponse(t, response).Components["redis"])
+	assert.NotContains(t, response.Body.String(), "password")
+}
+
+func TestServer_ReadyzFailsForInvalidProductionConfiguration(t *testing.T) {
+	withReadyConfiguration(t)
+	config.GetConfig().Environment = config.ProductionEnv
+	config.GetConfig().AuthSecret = "change-me"
+	mockDB := dbMocks.NewIDatabase(t)
+	mockRedis := redisMocks.NewIRedis(t)
+	mockDB.On("Ping", mock.Anything).Return(nil).Once()
+	mockDB.On("HasTables", mock.Anything, requiredReadinessTables).Return(nil).Once()
+	mockDB.On("MigrationReady", mock.Anything, uint(minimumMigrationVersion)).Return(nil).Once()
+	mockRedis.On("Ping", mock.Anything).Return(nil).Once()
+	server := NewServer(validation.New(), mockDB, mockRedis)
+	require.NoError(t, server.MapRoutes())
+
+	response := performHealthRequest(server, "/readyz")
+
+	assert.Equal(t, http.StatusServiceUnavailable, response.Code)
+	assert.Equal(t, "unavailable", decodeReadinessResponse(t, response).Components["configuration"])
+	assert.NotContains(t, response.Body.String(), "change-me")
+}
+
+func TestServer_ReadyzUsesDeterministicDependencyTimeout(t *testing.T) {
+	withReadyConfiguration(t)
+	mockDB := dbMocks.NewIDatabase(t)
+	mockRedis := redisMocks.NewIRedis(t)
+	mockDB.On("Ping", mock.Anything).Return(func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}).Once()
+	mockRedis.On("Ping", mock.Anything).Return(nil).Once()
+	server := NewServer(validation.New(), mockDB, mockRedis)
+	server.readinessTimeout = 20 * time.Millisecond
+	require.NoError(t, server.MapRoutes())
+
+	started := time.Now()
+	response := performHealthRequest(server, "/readyz")
+
+	assert.Equal(t, http.StatusServiceUnavailable, response.Code)
+	assert.Less(t, time.Since(started), 250*time.Millisecond)
+}
+
+func performHealthRequest(server *Server, path string) *httptest.ResponseRecorder {
+	response := httptest.NewRecorder()
+	server.GetEngine().ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+	return response
+}
+
+func decodeReadinessResponse(t *testing.T, response *httptest.ResponseRecorder) readinessResponse {
+	t.Helper()
+	var decoded readinessResponse
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &decoded))
+	return decoded
 }
 
 func TestServer_MetricsRouteEnabledByDefault(t *testing.T) {
@@ -389,11 +563,30 @@ func withMetricsConfig(t *testing.T, enabled *bool, path string) {
 	previousEnabled := cfg.MetricsEnabled
 	previousPath := cfg.MetricsPath
 
-	cfg.MetricsEnabled = enabled
+	cfg.MetricsEnabled = ""
+	if enabled != nil {
+		cfg.MetricsEnabled = strconv.FormatBool(*enabled)
+	}
 	cfg.MetricsPath = path
 
 	t.Cleanup(func() {
 		cfg.MetricsEnabled = previousEnabled
 		cfg.MetricsPath = previousPath
 	})
+}
+
+func withReadyConfiguration(t *testing.T) {
+	t.Helper()
+	cfg := config.GetConfig()
+	previous := *cfg
+	*cfg = config.Schema{
+		Environment:   "test",
+		HttpPort:      8888,
+		GrpcPort:      8889,
+		AuthSecret:    "test-secret",
+		DatabaseURI:   "postgres://configured",
+		RedisURI:      "redis:6379",
+		RedisPassword: "",
+	}
+	t.Cleanup(func() { *cfg = previous })
 }
