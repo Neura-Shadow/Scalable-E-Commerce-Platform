@@ -9,6 +9,7 @@ import (
 	"github.com/quangdangfit/gocommon/logger"
 	"github.com/quangdangfit/gocommon/validation"
 
+	cartModel "goshop/internal/cart/model"
 	inventoryModel "goshop/internal/inventory/model"
 	orderModel "goshop/internal/order/model"
 	outboxModel "goshop/internal/outbox/model"
@@ -42,13 +43,18 @@ func main() {
 	cfg := config.LoadConfig()
 	logger.Initialize(cfg.Environment)
 
-	db, err := dbs.NewDatabase(cfg.DatabaseURI)
+	db, err := dbs.NewDatabase(dbs.Config{
+		URI:             cfg.DatabaseURI,
+		MaxOpenConns:    config.DatabaseMaxOpenConns(),
+		MaxIdleConns:    config.DatabaseMaxIdleConns(),
+		ConnMaxLifetime: config.DatabaseConnMaxLifetime(),
+		ConnMaxIdleTime: config.DatabaseConnMaxIdleTime(),
+	})
 	if err != nil {
 		logger.Fatal("Cannot connect to database", err)
 	}
 
-	err = db.AutoMigrate(&userModel.User{}, &productModel.Product{}, &inventoryModel.Inventory{}, orderModel.Order{}, orderModel.OrderLine{}, &outboxModel.OutboxEvent{})
-	if err != nil {
+	if err = migrateDatabase(db, config.DatabaseAutoMigrate()); err != nil {
 		logger.Fatal("Database migration fail", err)
 	}
 
@@ -68,4 +74,21 @@ func main() {
 	if err = lifecycle.Run(rootCtx, httpSvr, grpcSvr); err != nil {
 		logger.Fatal(err)
 	}
+}
+
+func migrateDatabase(db dbs.IDatabase, enabled bool) error {
+	if !enabled {
+		return nil
+	}
+
+	return db.AutoMigrate(
+		&userModel.User{},
+		&productModel.Product{},
+		&inventoryModel.Inventory{},
+		orderModel.Order{},
+		orderModel.OrderLine{},
+		&outboxModel.OutboxEvent{},
+		&cartModel.Cart{},
+		&cartModel.CartLine{},
+	)
 }

@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang-jwt/jwt"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -13,10 +13,11 @@ import (
 
 func TestValidateTokenAcceptsRawAndBearerTokens(t *testing.T) {
 	withAuthSecret(t, "test-secret")
-	token := GenerateAccessToken(map[string]interface{}{
+	source := map[string]interface{}{
 		"id":   "user-1",
 		"role": "admin",
-	})
+	}
+	token := GenerateAccessToken(source)
 
 	rawPayload, err := ValidateToken(token)
 	require.NoError(t, err)
@@ -26,7 +27,10 @@ func TestValidateTokenAcceptsRawAndBearerTokens(t *testing.T) {
 	assert.Equal(t, "user-1", rawPayload["id"])
 	assert.Equal(t, "admin", rawPayload["role"])
 	assert.Equal(t, AccessTokenType, rawPayload["type"])
+	assert.Equal(t, uint64(0), mustTokenVersion(t, rawPayload))
 	assert.Equal(t, rawPayload, bearerPayload)
+	assert.NotContains(t, source, "type")
+	assert.NotContains(t, source, TokenVersionClaim)
 }
 
 func TestValidateTokenRejectsUnexpectedSigningMethod(t *testing.T) {
@@ -46,6 +50,24 @@ func TestValidateTokenRejectsUnexpectedSigningMethod(t *testing.T) {
 
 	assert.Nil(t, payload)
 	assert.Error(t, err)
+}
+
+func TestAccessTokenLifetimeIsFiveMinutes(t *testing.T) {
+	assert.Equal(t, 5*60, AccessTokenExpiredTime)
+}
+
+func TestTokenVersionRejectsFractionalOrNegativeClaims(t *testing.T) {
+	_, err := TokenVersion(map[string]interface{}{TokenVersionClaim: 1.5})
+	assert.Error(t, err)
+	_, err = TokenVersion(map[string]interface{}{TokenVersionClaim: -1.0})
+	assert.Error(t, err)
+}
+
+func mustTokenVersion(t *testing.T, payload map[string]interface{}) uint64 {
+	t.Helper()
+	version, err := TokenVersion(payload)
+	require.NoError(t, err)
+	return version
 }
 
 func withAuthSecret(t *testing.T, secret string) {

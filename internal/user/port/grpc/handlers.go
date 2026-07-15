@@ -5,9 +5,13 @@ import (
 	"errors"
 
 	"github.com/quangdangfit/gocommon/logger"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"goshop/internal/user/dto"
+	"goshop/internal/user/model"
 	"goshop/internal/user/service"
+	"goshop/pkg/middleware"
 	"goshop/pkg/utils"
 	pb "goshop/proto/gen/go/user"
 )
@@ -57,7 +61,7 @@ func (h *UserHandler) Register(ctx context.Context, req *pb.RegisterReq) (*pb.Re
 }
 
 func (h *UserHandler) GetMe(ctx context.Context, _ *pb.GetMeReq) (*pb.GetMeRes, error) {
-	userID, _ := ctx.Value("userId").(string)
+	userID := middleware.UserIDFromContext(ctx)
 	if userID == "" {
 		return nil, errors.New("unauthorized")
 	}
@@ -74,14 +78,21 @@ func (h *UserHandler) GetMe(ctx context.Context, _ *pb.GetMeReq) (*pb.GetMeRes, 
 }
 
 func (h *UserHandler) RefreshToken(ctx context.Context, req *pb.RefreshTokenReq) (*pb.RefreshTokenRes, error) {
-	userID, _ := ctx.Value("userId").(string)
+	userID := middleware.UserIDFromContext(ctx)
 	if userID == "" {
 		return nil, errors.New("unauthorized")
 	}
+	tokenVersion, ok := middleware.TokenVersionFromContext(ctx)
+	if !ok {
+		return nil, errors.New("unauthorized")
+	}
 
-	accessToken, err := h.service.RefreshToken(ctx, userID)
+	accessToken, err := h.service.RefreshToken(ctx, userID, tokenVersion)
 	if err != nil {
 		logger.Error("Failed to register ", err)
+		if errors.Is(err, model.ErrRefreshTokenRevoked) {
+			return nil, status.Error(codes.Unauthenticated, "unauthorized")
+		}
 		return nil, err
 	}
 
@@ -92,7 +103,7 @@ func (h *UserHandler) RefreshToken(ctx context.Context, req *pb.RefreshTokenReq)
 }
 
 func (h *UserHandler) ChangePassword(ctx context.Context, req *pb.ChangePasswordReq) (*pb.ChangePasswordRes, error) {
-	userID, _ := ctx.Value("userId").(string)
+	userID := middleware.UserIDFromContext(ctx)
 	if userID == "" {
 		return nil, errors.New("unauthorized")
 	}

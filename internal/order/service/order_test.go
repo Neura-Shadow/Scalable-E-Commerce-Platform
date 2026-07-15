@@ -3,10 +3,12 @@ package service
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/quangdangfit/gocommon/logger"
 	"github.com/quangdangfit/gocommon/validation"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 
@@ -76,11 +78,30 @@ func (suite *OrderServiceTestSuite) SetupTest() {
 	suite.T().Cleanup(func() {
 		suite.mockInventory.AssertExpectations(suite.T())
 	})
-	suite.service = NewOrderService(validator, suite.mockRepo, suite.mockProductRepo, suite.mockInventory)
+	suite.service = NewOrderService(
+		validator,
+		suite.mockRepo,
+		suite.mockProductRepo,
+		suite.mockInventory,
+		passthroughTransactor{uow: staticUnitOfWork{
+			orders:    suite.mockRepo,
+			products:  suite.mockProductRepo,
+			inventory: suite.mockInventory,
+		}},
+	)
 }
 
 func TestOrderServiceTestSuite(t *testing.T) {
 	suite.Run(t, new(OrderServiceTestSuite))
+}
+
+func TestStockConsumptionPlanRejectsOverflow(t *testing.T) {
+	_, err := stockConsumptionPlan([]*model.OrderLine{
+		{ProductID: "productID", Quantity: uint(math.MaxInt64)},
+		{ProductID: "productID", Quantity: 1},
+	})
+
+	assert.ErrorIs(t, err, model.ErrInvalidOrderQuantity)
 }
 
 // GetOrderByID
@@ -202,7 +223,7 @@ func (suite *OrderServiceTestSuite) TestPlaceOrderSuccess() {
 	suite.mockInventory.On("ConsumeStock", mock.Anything, "productID", int64(2)).
 		Return(nil).Times(1)
 
-	suite.mockRepo.On("CreateOrder", mock.Anything, "userID", mock.Anything).
+	suite.mockRepo.On("CreateOrder", mock.Anything, mock.AnythingOfType("*model.Order"), mock.Anything).
 		Return(&model.Order{
 			UserID: "userID",
 			Lines: []*model.OrderLine{
@@ -220,6 +241,108 @@ func (suite *OrderServiceTestSuite) TestPlaceOrderSuccess() {
 	suite.Equal(req.Lines[0].ProductID, order.Lines[0].ProductID)
 	suite.Equal(req.Lines[0].Quantity, order.Lines[0].Quantity)
 	suite.Nil(err)
+}
+
+func (suite *OrderServiceTestSuite) TestPlaceOrderCalculatesTotalsInMinorUnits() {
+	req := &dto.PlaceOrderReq{
+		UserID: "userID",
+		Lines: []dto.PlaceOrderLineReq{
+			{ProductID: "product-a", Quantity: 1},
+			{ProductID: "product-b", Quantity: 1},
+		},
+	}
+	suite.mockProductRepo.On("GetProductByID", mock.Anything, "product-a").
+		Return(&model.Product{ID: "product-a", Price: 0.10}, nil).Once()
+	suite.mockProductRepo.On("GetProductByID", mock.Anything, "product-b").
+		Return(&model.Product{ID: "product-b", Price: 0.20}, nil).Once()
+	suite.mockInventory.On("ConsumeStock", mock.Anything, "product-a", int64(1)).Return(nil).Once()
+	suite.mockInventory.On("ConsumeStock", mock.Anything, "product-b", int64(1)).Return(nil).Once()
+
+	var persistedOrder *model.Order
+	var persistedLines []*model.OrderLine
+	suite.mockRepo.On("CreateOrder", mock.Anything, mock.AnythingOfType("*model.Order"), mock.Anything).
+		Run(func(args mock.Arguments) {
+			persistedOrder = args.Get(1).(*model.Order)
+			persistedLines = args.Get(2).([]*model.OrderLine)
+		}).
+		Return(&model.Order{ID: "orderID", UserID: "userID", TotalPrice: 0.30}, nil).Once()
+
+	order, err := suite.service.PlaceOrder(context.Background(), req)
+
+	suite.Require().NoError(err)
+	suite.Equal(0.30, order.TotalPrice)
+	suite.Require().NotNil(persistedOrder)
+	suite.Equal(0.30, persistedOrder.TotalPrice)
+	suite.Require().Len(persistedLines, 2)
+	suite.Equal(0.10, persistedLines[0].Price)
+	suite.Equal(0.20, persistedLines[1].Price)
+}
+
+func (suite *OrderServiceTestSuite) TestPlaceOrderReplaysDurableIdempotencyRecord() {
+	fingerprint := "fingerprint"
+	req := &dto.PlaceOrderReq{
+		UserID:                 "userID",
+		IdempotencyKeyHash:     "key-hash",
+		IdempotencyFingerprint: fingerprint,
+		Lines:                  []dto.PlaceOrderLineReq{{ProductID: "productID", Quantity: 1}},
+	}
+	existing := &model.Order{
+		ID:                     "orderID",
+		UserID:                 req.UserID,
+		IdempotencyFingerprint: &fingerprint,
+	}
+	suite.mockRepo.On("GetOrderByIdempotencyKey", mock.Anything, req.UserID, req.IdempotencyKeyHash).
+		Return(existing, nil).Once()
+
+	order, err := suite.service.PlaceOrder(context.Background(), req)
+
+	suite.Require().NoError(err)
+	suite.Same(existing, order)
+	suite.True(order.IdempotencyReplay)
+	suite.mockRepo.AssertNotCalled(suite.T(), "CreateOrder", mock.Anything, mock.Anything, mock.Anything)
+}
+
+func (suite *OrderServiceTestSuite) TestPlaceOrderRejectsIdempotencyFingerprintMismatch() {
+	storedFingerprint := "stored"
+	req := &dto.PlaceOrderReq{
+		UserID:                 "userID",
+		IdempotencyKeyHash:     "key-hash",
+		IdempotencyFingerprint: "different",
+		Lines:                  []dto.PlaceOrderLineReq{{ProductID: "productID", Quantity: 1}},
+	}
+	suite.mockRepo.On("GetOrderByIdempotencyKey", mock.Anything, req.UserID, req.IdempotencyKeyHash).
+		Return(&model.Order{IdempotencyFingerprint: &storedFingerprint}, nil).Once()
+
+	order, err := suite.service.PlaceOrder(context.Background(), req)
+
+	suite.Nil(order)
+	suite.ErrorIs(err, model.ErrIdempotencyConflict)
+}
+
+func (suite *OrderServiceTestSuite) TestPlaceOrderReplaysWinnerAfterUniqueRace() {
+	fingerprint := "fingerprint"
+	req := &dto.PlaceOrderReq{
+		UserID:                 "userID",
+		IdempotencyKeyHash:     "key-hash",
+		IdempotencyFingerprint: fingerprint,
+		Lines:                  []dto.PlaceOrderLineReq{{ProductID: "productID", Quantity: 1}},
+	}
+	existing := &model.Order{ID: "winner", UserID: req.UserID, IdempotencyFingerprint: &fingerprint}
+	suite.mockRepo.On("GetOrderByIdempotencyKey", mock.Anything, req.UserID, req.IdempotencyKeyHash).
+		Return(nil, model.ErrOrderNotFound).Once()
+	suite.mockProductRepo.On("GetProductByID", mock.Anything, "productID").
+		Return(&model.Product{ID: "productID", Price: 1}, nil).Once()
+	suite.mockInventory.On("ConsumeStock", mock.Anything, "productID", int64(1)).Return(nil).Once()
+	suite.mockRepo.On("CreateOrder", mock.Anything, mock.AnythingOfType("*model.Order"), mock.Anything).
+		Return(nil, model.ErrIdempotencyDuplicate).Once()
+	suite.mockRepo.On("GetOrderByIdempotencyKey", mock.Anything, req.UserID, req.IdempotencyKeyHash).
+		Return(existing, nil).Once()
+
+	order, err := suite.service.PlaceOrder(context.Background(), req)
+
+	suite.Require().NoError(err)
+	suite.Equal("winner", order.ID)
+	suite.True(order.IdempotencyReplay)
 }
 
 func (suite *OrderServiceTestSuite) TestPlaceOrderSuccessCreatesOutboxEvent() {
@@ -252,7 +375,7 @@ func (suite *OrderServiceTestSuite) TestPlaceOrderSuccessCreatesOutboxEvent() {
 		}, nil).Times(1)
 	suite.mockInventory.On("ConsumeStock", mock.Anything, "productID", int64(2)).
 		Return(nil).Times(1)
-	suite.mockRepo.On("CreateOrder", mock.Anything, "userID", mock.Anything).
+	suite.mockRepo.On("CreateOrder", mock.Anything, mock.AnythingOfType("*model.Order"), mock.Anything).
 		Return(&model.Order{
 			ID:         "orderID",
 			UserID:     "userID",
@@ -321,7 +444,7 @@ func (suite *OrderServiceTestSuite) TestPlaceOrderConsumesStockInDeterministicAg
 			})
 		}).
 		Return(nil).Times(2)
-	suite.mockRepo.On("CreateOrder", mock.Anything, "userID", mock.Anything).
+	suite.mockRepo.On("CreateOrder", mock.Anything, mock.AnythingOfType("*model.Order"), mock.Anything).
 		Return(&model.Order{
 			UserID: "userID",
 			Lines: []*model.OrderLine{
@@ -395,7 +518,7 @@ func (suite *OrderServiceTestSuite) TestPlaceOrderCreateFail() {
 	suite.mockInventory.On("ConsumeStock", mock.Anything, "productID", int64(2)).
 		Return(nil).Times(1)
 
-	suite.mockRepo.On("CreateOrder", mock.Anything, "userID", mock.Anything).
+	suite.mockRepo.On("CreateOrder", mock.Anything, mock.AnythingOfType("*model.Order"), mock.Anything).
 		Return(nil, errors.New("error")).Times(1)
 
 	order, err := suite.service.PlaceOrder(context.Background(), req)
@@ -431,7 +554,7 @@ func (suite *OrderServiceTestSuite) TestPlaceOrderCreateFailReturnsTransactionEr
 		}, nil).Times(1)
 	suite.mockInventory.On("ConsumeStock", mock.Anything, "productID", int64(2)).
 		Return(nil).Times(1)
-	suite.mockRepo.On("CreateOrder", mock.Anything, "userID", mock.Anything).
+	suite.mockRepo.On("CreateOrder", mock.Anything, mock.AnythingOfType("*model.Order"), mock.Anything).
 		Return(nil, expectedErr).Times(1)
 
 	order, err := svc.PlaceOrder(context.Background(), req)
@@ -471,7 +594,7 @@ func (suite *OrderServiceTestSuite) TestPlaceOrderCreateFailDoesNotCreateOutboxE
 		}, nil).Times(1)
 	suite.mockInventory.On("ConsumeStock", mock.Anything, "productID", int64(2)).
 		Return(nil).Times(1)
-	suite.mockRepo.On("CreateOrder", mock.Anything, "userID", mock.Anything).
+	suite.mockRepo.On("CreateOrder", mock.Anything, mock.AnythingOfType("*model.Order"), mock.Anything).
 		Return(nil, expectedErr).Times(1)
 
 	order, err := svc.PlaceOrder(context.Background(), req)
@@ -564,9 +687,9 @@ func (suite *OrderServiceTestSuite) TestCancelOrderSuccess() {
 
 	suite.mockRepo.On("GetOrderByID", mock.Anything, orderID, true).
 		Return(existingOrder, nil).Times(1)
-	suite.mockInventory.On("Restock", mock.Anything, "productID", int64(2)).
+	suite.mockRepo.On("CancelOrderIfCancellable", mock.Anything, orderID, userID).
 		Return(nil).Times(1)
-	suite.mockRepo.On("UpdateOrder", mock.Anything, existingOrder).
+	suite.mockInventory.On("Restock", mock.Anything, "productID", int64(2)).
 		Return(nil).Times(1)
 
 	order, err := suite.service.CancelOrder(context.Background(), orderID, userID)
@@ -575,6 +698,43 @@ func (suite *OrderServiceTestSuite) TestCancelOrderSuccess() {
 	suite.Equal(111.1, order.TotalPrice)
 	suite.Equal(model.OrderStatusCancelled, order.Status)
 	suite.Nil(err)
+}
+
+func (suite *OrderServiceTestSuite) TestCancelOrderRestocksInDeterministicAggregatedOrder() {
+	userID := "userID"
+	orderID := "orderID"
+	existingOrder := &model.Order{
+		UserID: userID,
+		Status: model.OrderStatusNew,
+		Lines: []*model.OrderLine{
+			{ProductID: "product-b", Quantity: 2},
+			{ProductID: "product-a", Quantity: 1},
+			{ProductID: "product-b", Quantity: 3},
+		},
+	}
+	var restocked []stockConsumption
+
+	suite.mockRepo.On("GetOrderByID", mock.Anything, orderID, true).
+		Return(existingOrder, nil).Times(1)
+	suite.mockRepo.On("CancelOrderIfCancellable", mock.Anything, orderID, userID).
+		Return(nil).Times(1)
+	suite.mockInventory.On("Restock", mock.Anything, mock.AnythingOfType("string"), mock.AnythingOfType("int64")).
+		Run(func(args mock.Arguments) {
+			restocked = append(restocked, stockConsumption{
+				productID: args.String(1),
+				quantity:  args.Get(2).(int64),
+			})
+		}).
+		Return(nil).Times(2)
+
+	order, err := suite.service.CancelOrder(context.Background(), orderID, userID)
+
+	suite.NoError(err)
+	suite.NotNil(order)
+	suite.Equal([]stockConsumption{
+		{productID: "product-a", quantity: 1},
+		{productID: "product-b", quantity: 5},
+	}, restocked)
 }
 
 func (suite *OrderServiceTestSuite) TestCancelOrderFail() {
@@ -595,9 +755,7 @@ func (suite *OrderServiceTestSuite) TestCancelOrderFail() {
 
 	suite.mockRepo.On("GetOrderByID", mock.Anything, orderID, true).
 		Return(existingOrder, nil).Times(1)
-	suite.mockInventory.On("Restock", mock.Anything, "productID", int64(2)).
-		Return(nil).Times(1)
-	suite.mockRepo.On("UpdateOrder", mock.Anything, existingOrder).
+	suite.mockRepo.On("CancelOrderIfCancellable", mock.Anything, orderID, userID).
 		Return(errors.New("error")).Times(1)
 
 	order, err := suite.service.CancelOrder(context.Background(), orderID, userID)

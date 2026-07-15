@@ -18,25 +18,63 @@ type IOrderRepository struct {
 	mock.Mock
 }
 
-// CreateOrder provides a mock function with given fields: ctx, userID, lines
-func (_m *IOrderRepository) CreateOrder(ctx context.Context, userID string, lines []*model.OrderLine) (*model.Order, error) {
-	ret := _m.Called(ctx, userID, lines)
+// CancelOrderIfCancellable provides a mock function with given fields: ctx, orderID, userID
+func (_m *IOrderRepository) CancelOrderIfCancellable(ctx context.Context, orderID string, userID string) error {
+	ret := _m.Called(ctx, orderID, userID)
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(context.Context, string, string) error); ok {
+		r0 = rf(ctx, orderID, userID)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
+// CreateOrder provides a mock function with given fields: ctx, order, lines
+func (_m *IOrderRepository) CreateOrder(ctx context.Context, order *model.Order, lines []*model.OrderLine) (*model.Order, error) {
+	ret := _m.Called(ctx, order, lines)
 
 	var r0 *model.Order
 	var r1 error
-	if rf, ok := ret.Get(0).(func(context.Context, string, []*model.OrderLine) (*model.Order, error)); ok {
-		return rf(ctx, userID, lines)
+	if rf, ok := ret.Get(0).(func(context.Context, *model.Order, []*model.OrderLine) (*model.Order, error)); ok {
+		return rf(ctx, order, lines)
 	}
-	if rf, ok := ret.Get(0).(func(context.Context, string, []*model.OrderLine) *model.Order); ok {
-		r0 = rf(ctx, userID, lines)
+	if rf, ok := ret.Get(0).(func(context.Context, *model.Order, []*model.OrderLine) *model.Order); ok {
+		r0 = rf(ctx, order, lines)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(*model.Order)
 		}
 	}
 
-	if rf, ok := ret.Get(1).(func(context.Context, string, []*model.OrderLine) error); ok {
-		r1 = rf(ctx, userID, lines)
+	if rf, ok := ret.Get(1).(func(context.Context, *model.Order, []*model.OrderLine) error); ok {
+		r1 = rf(ctx, order, lines)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// GetOrderByIdempotencyKey provides a mock function with given fields: ctx, userID, keyHash
+func (_m *IOrderRepository) GetOrderByIdempotencyKey(ctx context.Context, userID string, keyHash string) (*model.Order, error) {
+	ret := _m.Called(ctx, userID, keyHash)
+
+	var r0 *model.Order
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, string, string) (*model.Order, error)); ok {
+		return rf(ctx, userID, keyHash)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, string, string) *model.Order); ok {
+		r0 = rf(ctx, userID, keyHash)
+	} else if ret.Get(0) != nil {
+		r0 = ret.Get(0).(*model.Order)
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, string, string) error); ok {
+		r1 = rf(ctx, userID, keyHash)
 	} else {
 		r1 = ret.Error(1)
 	}

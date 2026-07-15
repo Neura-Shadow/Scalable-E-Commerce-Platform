@@ -11,6 +11,7 @@ import (
 	"goshop/pkg/jtoken"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Login
@@ -94,14 +95,31 @@ func TestUserAPI_LoginUserWrongPassword(t *testing.T) {
 // =================================================================================================
 
 func TestUserAPI_RegisterSuccess(t *testing.T) {
-	defer cleanData()
-
 	user := &dto.RegisterReq{
 		Email:    "register@test.com",
 		Password: "test123456",
 	}
-	writer := makeRequest("POST", "/api/v1/auth/register", user, "")
-	assert.Equal(t, http.StatusOK, writer.Code)
+	register := makeRequest("POST", "/api/v1/auth/register", user, "")
+	require.Equal(t, http.StatusOK, register.Code)
+	var registered struct {
+		Result dto.RegisterRes `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal(register.Body.Bytes(), &registered))
+	defer cleanData(&model.User{ID: registered.Result.User.ID})
+
+	login := makeRequest("POST", "/api/v1/auth/login", &dto.LoginReq{
+		Email:    user.Email,
+		Password: user.Password,
+	}, "")
+	require.Equal(t, http.StatusOK, login.Code)
+
+	var response struct {
+		Result dto.LoginRes `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal(login.Body.Bytes(), &response))
+	assert.Equal(t, user.Email, response.Result.User.Email)
+	assert.NotEmpty(t, response.Result.AccessToken)
+	assert.NotEmpty(t, response.Result.RefreshToken)
 }
 
 func TestUserAPI_RegisterInvalidFieldType(t *testing.T) {
@@ -252,6 +270,42 @@ func TestUserAPI_ChangePasswordSuccess(t *testing.T) {
 
 	writer := makeRequest("PUT", "/api/v1/auth/change-password", req, token)
 	assert.Equal(t, http.StatusOK, writer.Code)
+}
+
+func TestUserAPI_ChangePasswordRevokesExistingRefreshToken(t *testing.T) {
+	user := model.User{Email: "refresh-revocation@example.com", Password: "123456"}
+	require.NoError(t, dbTest.Create(context.Background(), &user))
+	defer cleanData(&user)
+
+	login := makeRequest("POST", "/api/v1/auth/login", &dto.LoginReq{
+		Email: user.Email, Password: "123456",
+	}, "")
+	require.Equal(t, http.StatusOK, login.Code)
+	var loginResponse struct {
+		Result dto.LoginRes `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal(login.Body.Bytes(), &loginResponse))
+	access := loginResponse.Result.AccessToken
+	refresh := loginResponse.Result.RefreshToken
+	require.NotEmpty(t, access)
+	require.NotEmpty(t, refresh)
+
+	changed := makeRequest("PUT", "/api/v1/auth/change-password", &dto.ChangePasswordReq{
+		Password: "123456", NewPassword: "new123456",
+	}, access)
+	require.Equal(t, http.StatusOK, changed.Code)
+
+	revoked := makeRequest("POST", "/api/v1/auth/refresh", nil, refresh)
+	assert.Equal(t, http.StatusUnauthorized, revoked.Code)
+
+	newLogin := makeRequest("POST", "/api/v1/auth/login", &dto.LoginReq{
+		Email: user.Email, Password: "new123456",
+	}, "")
+	require.Equal(t, http.StatusOK, newLogin.Code)
+	require.NoError(t, json.Unmarshal(newLogin.Body.Bytes(), &loginResponse))
+	newRefresh := loginResponse.Result.RefreshToken
+	assert.NotEqual(t, refresh, newRefresh)
+	assert.Equal(t, http.StatusOK, makeRequest("POST", "/api/v1/auth/refresh", nil, newRefresh).Code)
 }
 
 func TestUserAPI_ChangePasswordUnauthorized(t *testing.T) {

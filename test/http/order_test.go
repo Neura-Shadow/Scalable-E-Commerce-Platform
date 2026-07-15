@@ -2,6 +2,8 @@ package http
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	inventoryModel "goshop/internal/inventory/model"
 	"goshop/internal/order/dto"
@@ -273,8 +276,8 @@ func TestOrderAPI_PlaceOrderInvalidMissQuantity(t *testing.T) {
 	writer := makeRequest("POST", "/api/v1/orders", req, accessToken())
 	var response map[string]map[string]string
 	_ = json.Unmarshal(writer.Body.Bytes(), &response)
-	assert.Equal(t, http.StatusInternalServerError, writer.Code)
-	assert.Equal(t, "Something went wrong", response["error"]["message"])
+	assert.Equal(t, http.StatusBadRequest, writer.Code)
+	assert.Equal(t, "Invalid quantity", response["error"]["message"])
 }
 
 func TestOrderAPI_PlaceOrderInvalidProductNotFound(t *testing.T) {
@@ -377,6 +380,7 @@ func TestOrderAPI_IdempotentPlaceOrderDuplicateReturnsSameOrder(t *testing.T) {
 	token := tokenForUser(&u)
 
 	first := makeRequestWithHeaders("POST", "/api/v1/orders", req, token, headers)
+	require.NoError(t, testCache.Remove(testOrderIdempotencyCacheKey(u.ID, "checkout-duplicate")))
 	second := makeRequestWithHeaders("POST", "/api/v1/orders", req, token, headers)
 
 	var firstOrder dto.Order
@@ -389,6 +393,34 @@ func TestOrderAPI_IdempotentPlaceOrderDuplicateReturnsSameOrder(t *testing.T) {
 
 	var orderCount int64
 	dbTest.GetDB().Model(&model.Order{}).Where("user_id = ?", u.ID).Count(&orderCount)
+	assert.Equal(t, int64(1), orderCount)
+}
+
+func TestOrderAPI_IdempotencyKeyRejectsDifferentRequestAfterCacheLoss(t *testing.T) {
+	defer cleanData()
+
+	u := userModel.User{
+		Email:    "idempotent-conflict@test.com",
+		Password: "test123456",
+		Role:     userModel.UserRoleCustomer,
+	}
+	require.NoError(t, dbTest.Create(context.Background(), &u))
+	p := productModel.Product{Name: "idempotent-conflict-product", Description: "fixture", Price: 1}
+	require.NoError(t, dbTest.Create(context.Background(), &p))
+
+	headers := map[string]string{"Idempotency-Key": "checkout-conflict"}
+	token := tokenForUser(&u)
+	firstReq := &dto.PlaceOrderReq{Lines: []dto.PlaceOrderLineReq{{ProductID: p.ID, Quantity: 1}}}
+	secondReq := &dto.PlaceOrderReq{Lines: []dto.PlaceOrderLineReq{{ProductID: p.ID, Quantity: 2}}}
+
+	first := makeRequestWithHeaders("POST", "/api/v1/orders", firstReq, token, headers)
+	require.Equal(t, http.StatusOK, first.Code)
+	require.NoError(t, testCache.Remove(testOrderIdempotencyCacheKey(u.ID, "checkout-conflict")))
+	second := makeRequestWithHeaders("POST", "/api/v1/orders", secondReq, token, headers)
+
+	assert.Equal(t, http.StatusConflict, second.Code)
+	var orderCount int64
+	require.NoError(t, dbTest.GetDB().Model(&model.Order{}).Where("user_id = ?", u.ID).Count(&orderCount).Error)
 	assert.Equal(t, int64(1), orderCount)
 }
 
@@ -476,6 +508,11 @@ func TestOrderAPI_MissingIdempotencyKeyAllowsSeparateOrders(t *testing.T) {
 	assert.Equal(t, int64(2), orderCount)
 }
 
+func testOrderIdempotencyCacheKey(userID, key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return fmt.Sprintf("idempotency:orders:%s:%s", userID, hex.EncodeToString(sum[:]))
+}
+
 func TestOrderAPI_ConcurrentOrdersNeverOversell(t *testing.T) {
 	defer cleanData()
 
@@ -538,6 +575,18 @@ func TestOrderAPI_ConcurrentOrdersNeverOversell(t *testing.T) {
 	var orderCount int64
 	dbTest.GetDB().Model(&model.Order{}).Where("user_id = ?", u.ID).Count(&orderCount)
 	assert.Equal(t, int64(3), orderCount)
+}
+
+func TestOrderAPI_RejectsQuantityAboveBusinessLimit(t *testing.T) {
+	req := &dto.PlaceOrderReq{
+		Lines: []dto.PlaceOrderLineReq{
+			{ProductID: "not-used", Quantity: dto.MaxOrderLineQuantity + 1},
+		},
+	}
+
+	writer := makeRequest("POST", "/api/v1/orders", req, accessToken())
+
+	assert.Equal(t, http.StatusBadRequest, writer.Code)
 }
 
 // Get Order Detail
@@ -688,6 +737,137 @@ func TestOrderAPI_CancelOrderSuccess(t *testing.T) {
 	assert.Equal(t, http.StatusOK, writer.Code)
 }
 
+func TestOrderAPI_ConcurrentCancellationRestocksOnce(t *testing.T) {
+	u := userModel.User{
+		Email:    "concurrent-cancel@test.com",
+		Password: "test123456",
+	}
+	dbTest.Create(context.Background(), &u)
+	defer cleanData(&u)
+
+	p := productModel.Product{
+		Name:        "concurrent-cancel-product",
+		Description: "concurrent-cancel-product",
+		Price:       1,
+	}
+	dbTest.Create(context.Background(), &p)
+	dbTest.GetDB().Model(&inventoryModel.Inventory{}).
+		Where("product_id = ?", p.ID).
+		Update("quantity", int64(10))
+
+	o := model.Order{
+		UserID: u.ID,
+		Lines: []*model.OrderLine{
+			{ProductID: p.ID, Quantity: 2},
+		},
+	}
+	dbTest.Create(context.Background(), &o)
+	token := tokenForUser(&u)
+
+	var wg sync.WaitGroup
+	statusCodes := make(chan int, 10)
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			writer := makeRequest("PUT", fmt.Sprintf("/api/v1/orders/%s/cancel", o.ID), nil, token)
+			statusCodes <- writer.Code
+		}()
+	}
+	wg.Wait()
+	close(statusCodes)
+
+	statusCounts := map[int]int{}
+	for code := range statusCodes {
+		statusCounts[code]++
+	}
+	var inventory inventoryModel.Inventory
+	err := dbTest.GetDB().Where("product_id = ?", p.ID).First(&inventory).Error
+	assert.NoError(t, err)
+	assert.Equal(t, 1, statusCounts[http.StatusOK])
+	assert.Equal(t, 9, statusCounts[http.StatusConflict])
+	assert.Equal(t, int64(12), inventory.Quantity)
+}
+
+func TestOrderAPI_ConcurrentMultiProductCancellationsAvoidDeadlocks(t *testing.T) {
+	u := userModel.User{
+		Email:    "concurrent-multi-cancel@test.com",
+		Password: "test123456",
+	}
+	dbTest.Create(context.Background(), &u)
+	defer cleanData(&u)
+
+	products := []productModel.Product{
+		{
+			Name:        "concurrent-multi-cancel-product-a",
+			Description: "concurrent-multi-cancel-product-a",
+			Price:       1,
+		},
+		{
+			Name:        "concurrent-multi-cancel-product-b",
+			Description: "concurrent-multi-cancel-product-b",
+			Price:       1,
+		},
+	}
+	for i := range products {
+		dbTest.Create(context.Background(), &products[i])
+		dbTest.GetDB().Model(&inventoryModel.Inventory{}).
+			Where("product_id = ?", products[i].ID).
+			Update("quantity", int64(0))
+	}
+
+	const pairCount = 8
+	orders := make([]model.Order, 0, pairCount*2)
+	for i := 0; i < pairCount; i++ {
+		orders = append(orders,
+			model.Order{
+				UserID: u.ID,
+				Lines: []*model.OrderLine{
+					{ProductID: products[0].ID, Quantity: 1},
+					{ProductID: products[1].ID, Quantity: 1},
+				},
+			},
+			model.Order{
+				UserID: u.ID,
+				Lines: []*model.OrderLine{
+					{ProductID: products[1].ID, Quantity: 1},
+					{ProductID: products[0].ID, Quantity: 1},
+				},
+			},
+		)
+	}
+	for i := range orders {
+		assert.NoError(t, dbTest.Create(context.Background(), &orders[i]))
+	}
+
+	token := tokenForUser(&u)
+	start := make(chan struct{})
+	statusCodes := make(chan int, len(orders))
+	var wg sync.WaitGroup
+	for i := range orders {
+		wg.Add(1)
+		go func(orderID string) {
+			defer wg.Done()
+			<-start
+			writer := makeRequest("PUT", fmt.Sprintf("/api/v1/orders/%s/cancel", orderID), nil, token)
+			statusCodes <- writer.Code
+		}(orders[i].ID)
+	}
+	close(start)
+	wg.Wait()
+	close(statusCodes)
+
+	for code := range statusCodes {
+		assert.Equal(t, http.StatusOK, code)
+	}
+	for i := range products {
+		var inventory inventoryModel.Inventory
+		err := dbTest.GetDB().Where("product_id = ?", products[i].ID).First(&inventory).Error
+		assert.NoError(t, err)
+		assert.Equal(t, int64(len(orders)), inventory.Quantity)
+	}
+}
+
 func TestOrderAPI_CancelOrderNotFound(t *testing.T) {
 	writer := makeRequest("PUT", "/api/v1/orders/notfound/cancel", nil, accessToken())
 	var response map[string]map[string]string
@@ -738,8 +918,8 @@ func TestOrderAPI_CancelOrderStatusDone(t *testing.T) {
 	writer := makeRequest("PUT", fmt.Sprintf("/api/v1/orders/%s/cancel", o.ID), nil, token)
 	var response map[string]map[string]string
 	_ = json.Unmarshal(writer.Body.Bytes(), &response)
-	assert.Equal(t, http.StatusInternalServerError, writer.Code)
-	assert.Equal(t, "Something went wrong", response["error"]["message"])
+	assert.Equal(t, http.StatusConflict, writer.Code)
+	assert.Equal(t, "Invalid order state", response["error"]["message"])
 }
 
 func TestOrderAPI_CancelOrderStatusCancelled(t *testing.T) {
@@ -784,8 +964,8 @@ func TestOrderAPI_CancelOrderStatusCancelled(t *testing.T) {
 	writer := makeRequest("PUT", fmt.Sprintf("/api/v1/orders/%s/cancel", o.ID), nil, token)
 	var response map[string]map[string]string
 	_ = json.Unmarshal(writer.Body.Bytes(), &response)
-	assert.Equal(t, http.StatusInternalServerError, writer.Code)
-	assert.Equal(t, "Something went wrong", response["error"]["message"])
+	assert.Equal(t, http.StatusConflict, writer.Code)
+	assert.Equal(t, "Invalid order state", response["error"]["message"])
 }
 
 func TestOrderAPI_CancelOrderNotMine(t *testing.T) {

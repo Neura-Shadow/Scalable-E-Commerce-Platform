@@ -174,6 +174,18 @@ func (suite *ProductServiceTestSuite) TestCreateMissProductName() {
 	suite.NotNil(err)
 }
 
+func (suite *ProductServiceTestSuite) TestCreateRejectsMoreThanTwoDecimalPlaces() {
+	product, err := suite.service.Create(context.Background(), &dto.CreateProductReq{
+		Name:        "product",
+		Description: "product description",
+		Price:       1.001,
+	})
+
+	suite.Nil(product)
+	suite.Error(err)
+	suite.mockRepo.AssertNotCalled(suite.T(), "Create", mock.Anything, mock.Anything)
+}
+
 // Update
 // =================================================================
 

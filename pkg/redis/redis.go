@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	goredis "github.com/go-redis/redis/v8"
+	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/quangdangfit/gocommon/logger"
 )
@@ -15,11 +15,24 @@ const (
 	Timeout = 1
 )
 
+var incrementWithExpirationScript = goredis.NewScript(`
+local count = redis.call("INCR", KEYS[1])
+local expiration_ms = tonumber(ARGV[1])
+if expiration_ms > 0 then
+    local ttl = redis.call("PTTL", KEYS[1])
+    if count == 1 or ttl == -1 then
+        redis.call("PEXPIRE", KEYS[1], expiration_ms)
+    end
+end
+return count
+`)
+
 // IRedis interface
 //
 //go:generate mockery --name=IRedis
 type IRedis interface {
 	IsConnected() bool
+	Ping(ctx context.Context) error
 	Get(key string, value interface{}) error
 	Exists(ctx context.Context, key string) (bool, error)
 	Set(key string, value interface{}) error
@@ -79,16 +92,14 @@ func New(config Config) IRedis {
 func (r *redis) IsConnected() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), Timeout*time.Second)
 	defer cancel()
+	return r.Ping(ctx) == nil
+}
 
-	if r.cmd == nil {
-		return false
+func (r *redis) Ping(ctx context.Context) error {
+	if r == nil || r.cmd == nil {
+		return fmt.Errorf("redis command client is required")
 	}
-
-	_, err := r.cmd.Ping(ctx).Result()
-	if err != nil {
-		return false
-	}
-	return true
+	return r.cmd.Ping(ctx).Err()
 }
 
 func (r *redis) Get(key string, value interface{}) error {
@@ -144,17 +155,11 @@ func (r *redis) IncrementWithExpiration(key string, expiration time.Duration) (i
 	ctx, cancel := context.WithTimeout(context.Background(), Timeout*time.Second)
 	defer cancel()
 
-	count, err := r.cmd.Incr(ctx, key).Result()
-	if err != nil {
-		return 0, err
-	}
-	if count == 1 && expiration > 0 {
-		if err := r.cmd.Expire(ctx, key, expiration).Err(); err != nil {
-			return 0, err
-		}
+	if r.cmd == nil {
+		return 0, fmt.Errorf("redis command client is required")
 	}
 
-	return count, nil
+	return incrementWithExpirationScript.Run(ctx, r.cmd, []string{key}, expiration.Milliseconds()).Int64()
 }
 
 func (r *redis) XAdd(ctx context.Context, stream string, values map[string]interface{}) (string, error) {
@@ -352,28 +357,43 @@ func (r *redis) Keys(pattern string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), Timeout*time.Second)
 	defer cancel()
 
-	keys, err := r.cmd.Keys(ctx, pattern).Result()
-	if err != nil {
-		return nil, err
+	const scanBatchSize = 100
+	var (
+		cursor uint64
+		keys   []string
+	)
+	for {
+		batch, nextCursor, err := r.cmd.Scan(ctx, cursor, pattern, scanBatchSize).Result()
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, batch...)
+		if nextCursor == 0 {
+			return keys, nil
+		}
+		cursor = nextCursor
 	}
-
-	return keys, nil
 }
 
 func (r *redis) RemovePattern(pattern string) error {
-	keys, err := r.Keys(pattern)
-	if err != nil {
-		return err
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), Timeout*time.Second)
+	defer cancel()
 
-	if len(keys) == 0 {
-		return nil
+	const scanBatchSize = 100
+	var cursor uint64
+	for {
+		keys, nextCursor, err := r.cmd.Scan(ctx, cursor, pattern, scanBatchSize).Result()
+		if err != nil {
+			return err
+		}
+		if len(keys) > 0 {
+			if err := r.cmd.Del(ctx, keys...).Err(); err != nil {
+				return err
+			}
+		}
+		if nextCursor == 0 {
+			return nil
+		}
+		cursor = nextCursor
 	}
-
-	err = r.Remove(keys...)
-	if err != nil {
-		return err
-	}
-
-	return nil
 }

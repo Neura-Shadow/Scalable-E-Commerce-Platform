@@ -1,302 +1,192 @@
 # Production Deployment
 
-This project is an API backend. A production deployment should run the Go service, PostgreSQL, and Redis as separate managed services or hardened containers.
+This repository is a production-minded, single-region e-commerce backend. It does not implement multi-region active-active operation, Redis Cluster, cross-region caching, database sharding, service mesh, or multi-region failover. Measured local smoke results are recorded in `docs/benchmark-report-v1.md`; they are not a capacity guarantee.
 
-## Required services
+## Runtime services
 
-- Go API container or VM process
-- PostgreSQL
-- Redis
-- TLS terminator or reverse proxy
-- Log aggregation
-- Metrics and alerting
+- one or more API replicas built from the reviewed image
+- PostgreSQL as the system of record
+- Redis for cache, idempotency, rate limits, and optional Streams processing
+- TLS termination, restricted metrics access, logs, metrics, and alerts
 
-## Configuration
+Run migrations as a deployment job before API rollout. Do not let every API replica mutate the schema at startup.
 
-Configure the service with environment variables or a secret manager. Do not commit `pkg/config/config.yaml` with real secrets.
+## Required configuration
 
-Required values:
+Supply configuration through environment variables or a secret manager. Never bake `pkg/config/config.yaml`, `.env` files, JWTs, database credentials, or Redis credentials into an image.
 
 ```text
-environment
+environment=production
 http_port
 grpc_port
+grpc_reflection_enabled=false
+swagger_enabled=false
 auth_secret
 database_uri
+database_auto_migrate=false
+database_max_open_conns
+database_max_idle_conns
+database_conn_max_lifetime_seconds
+database_conn_max_idle_time_seconds
 redis_uri
 redis_password
 redis_db
+metrics_enabled=false
 ```
 
-Recommended hardening values:
+Production validation rejects missing ports, database/Redis endpoints, placeholder JWT secrets, invalid booleans, invalid pool settings, and `database_auto_migrate=true`.
 
-```text
-http_read_timeout_seconds
-http_write_timeout_seconds
-http_idle_timeout_seconds
-http_read_header_timeout_seconds
-http_max_header_bytes
-max_request_body_bytes
-metrics_enabled
-metrics_path
-order_idempotency_ttl_seconds
-order_rate_limit_limit
-order_rate_limit_window_seconds
-outbox_publisher_enabled
-outbox_publisher_type
-outbox_redis_stream_name
-outbox_publish_batch_size
-outbox_publish_max_attempts
-outbox_publish_retry_base_seconds
-outbox_publish_interval_seconds
-outbox_processing_timeout_seconds
-outbox_consumer_enabled
-outbox_consumer_group
-outbox_consumer_name
-outbox_consumer_batch_size
-outbox_consumer_block_seconds
-outbox_consumer_processed_ttl_seconds
-outbox_consumer_claim_min_idle_seconds
-outbox_consumer_claim_batch_size
-outbox_consumer_max_delivery_attempts
-outbox_consumer_failure_ttl_seconds
-outbox_dead_letter_stream_name
-```
+The sample file also documents HTTP limits, metrics, order protection, publisher, and consumer settings. Keep `/metrics` internal or restrict it to trusted Prometheus scrapers. gRPC reflection is disabled by default in production and may be explicitly enabled only for a controlled diagnostic environment.
 
-## Build
+Apply account and source-aware throttling to HTTP and gRPC login/registration at the ingress or API gateway. The application rate-limits checkout, but this release does not implement authentication-endpoint throttling itself. Treat a deployment without an equivalent edge policy as incomplete.
 
-Example container build:
+Refresh tokens are 30-day bearer tokens with user-wide token-version revocation after a password change. They are not rotated per use and there is no per-session logout store; a stolen refresh token therefore remains usable until expiry or password-change revocation. Access tokens expire after five minutes, so an already issued access token may remain valid for that bounded period after a password change.
+
+## Database migrations
+
+The authoritative schema is under `migrations/`. Version 1 adopts or creates the six core tables and outbox schema after a legacy-data preflight, version 2 adds `carts` and `cart_lines`, version 3 adds the user token version used for refresh-token revocation, version 4 converges legacy AutoMigrate column nullability/defaults, and version 5 adds durable order idempotency plus two-decimal monetary constraints. Version 4 backfills only safe defaults. Versions 1, 4, and 5 stop before their schema changes when ambiguous or constraint-violating legacy data requires operator remediation. The release uses `golang-migrate` v4.18.3 because it supports versioned SQL, PostgreSQL, deterministic up/down execution, and a small deployment-time CLI. It is intentionally kept outside the application dependency graph.
+
+Install the pinned CLI:
 
 ```bash
-docker build -t scalable-ecommerce-platform:latest .
+go install -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@v4.18.3
 ```
 
-## Run
-
-Example local container run:
+Apply, inspect, and roll back one reviewed migration:
 
 ```bash
-docker run --rm -p 8888:8888 \
-  -e environment=production \
-  -e http_port=8888 \
-  -e grpc_port=8889 \
-  -e auth_secret="${AUTH_SECRET}" \
-  -e database_uri="${DATABASE_URI}" \
-  -e redis_uri="${REDIS_URI}" \
-  scalable-ecommerce-platform:latest
+migrate -path migrations -database "$DATABASE_URI" up
+migrate -path migrations -database "$DATABASE_URI" version
+migrate -path migrations -database "$DATABASE_URI" down 1
 ```
 
-## Health checks
+`down 1` is for an explicitly reviewed rollback and removes version 5 idempotency metadata, so it must not be used while clients rely on durable replay. Version 4 intentionally keeps its stricter column contracts when rolled back because automatically restoring nullable production columns is unsafe; version 3 application code remains compatible with that stricter schema. The initial down migration drops production tables and must never be run against data that must be retained. A second `up` is safe and reports no change. CI applies migrations to an empty PostgreSQL database before integration tests and validates indexes, constraints, re-application, down behavior, fresh/adopted column equivalence, and legacy preflight recovery.
 
-The HTTP service exposes:
+An ambiguous-NULL preflight failure is reported as migration version 4 in a dirty state. The preflight runs before any v4 backfill. After taking a backup, repair the named table and column, verify that no other ambiguous NULL values remain, reset only the migration metadata to the last completed version, and rerun the remaining migrations:
+
+```bash
+migrate -path migrations -database "$DATABASE_URI" version
+# Repair and verify the data named by the preflight error in PostgreSQL.
+migrate -path migrations -database "$DATABASE_URI" force 3
+migrate -path migrations -database "$DATABASE_URI" up
+migrate -path migrations -database "$DATABASE_URI" version
+```
+
+The final command must report version 5 without `dirty`. `force 3` does not execute rollback SQL and is verified only for this v4 preflight path.
+
+A version 1 legacy-data preflight failure occurs before v1 creates indexes or constraints. After backup and repair of the exact duplicate, invalid status, negative value, or orphan named by the error, use the tested recovery sequence:
+
+```bash
+migrate -path migrations -database "$DATABASE_URI" version
+# Repair and verify the legacy invariant named by the preflight error.
+migrate -path migrations -database "$DATABASE_URI" force -- -1
+migrate -path migrations -database "$DATABASE_URI" up
+migrate -path migrations -database "$DATABASE_URI" version
+```
+
+A version 5 monetary-scale preflight failure requires repairing values with more than two decimal places according to business policy, then `force 4` and `up`. Never use `force` for an unexplained failure or after a migration that may have partially changed schema; restore from backup or obtain a database review instead.
+
+Development and tests may opt into GORM `AutoMigrate`, but production startup requires `database_auto_migrate=false`. Do not mix both schema ownership models in production.
+
+## PostgreSQL pool sizing
+
+The application applies all four settings:
 
 ```text
-GET /health
+database_max_open_conns=25
+database_max_idle_conns=5
+database_conn_max_lifetime_seconds=300
+database_conn_max_idle_time_seconds=60
 ```
 
-Use this endpoint as a lightweight liveness check only. It intentionally does not prove PostgreSQL, Redis, publisher, or consumer readiness. For production readiness, combine `/health` with a platform-level check that verifies database connectivity, Redis connectivity, migration status, and the Prometheus scrape path.
+The defaults are safe starting points, not throughput recommendations. Calculate the per-replica maximum from PostgreSQL `max_connections` after reserving capacity for migrations, workers, monitoring, backups, and administrators. The sum across API replicas must remain below that budget. Increasing the pool can increase contention and does not automatically improve throughput.
 
-The metrics endpoint is enabled by default:
+## Health endpoints
 
-```text
-GET /metrics
+- `GET /livez` proves only that the process and HTTP server are alive.
+- `GET /health` is a compatibility alias of `/livez`.
+- `GET /readyz` checks production configuration, PostgreSQL connectivity, required schema tables, and Redis connectivity with short timeouts.
+
+Readiness responses expose only `ready` or `unavailable` component states. They do not return DSNs, credentials, hostnames, or raw errors. Outbox backlog, Redis pending entries, and DLQ entries belong in metrics and alerts and do not make the API unready.
+
+## Container workflow
+
+Build the release image:
+
+```bash
+docker build -t scalable-ecommerce-platform:v1.0.0 .
 ```
 
-In production, expose it only to trusted Prometheus scrapers or restrict it behind an internal reverse proxy. Disable it in the app if the platform supplies metrics another way:
+The image uses a multi-stage Go build, an Alpine runtime without a compiler, UID/GID `10001`, explicit HTTP/gRPC ports, `SIGTERM`, and a `/livez` healthcheck. The Compose API additionally uses a read-only root filesystem, `/tmp` tmpfs, and `no-new-privileges`.
 
-```yaml
-metrics_enabled: false
-metrics_path: /metrics
+Set the required Compose substitutions and start only local PostgreSQL and Redis:
+
+```bash
+export DATABASE_URI="postgres://postgres:postgres@postgres:5432/goshop_test?sslmode=disable"
+export AUTH_SECRET="$(openssl rand -hex 32)"
+docker compose up -d
 ```
 
-Recommended Prometheus scrape config:
+Start migrations and the API profile with a secret supplied by the environment:
 
-```yaml
-scrape_configs:
-  - job_name: goshop-api
-    metrics_path: /metrics
-    static_configs:
-      - targets: ["api:8888"]
+```bash
+DATABASE_URI="postgres://postgres:postgres@postgres:5432/goshop_test?sslmode=disable" \
+AUTH_SECRET="$(openssl rand -hex 32)" \
+docker compose --profile application up -d --build
 ```
 
-## Service lifecycle
-
-The API process owns one root context created from `SIGINT` and `SIGTERM`. That context coordinates the HTTP server, gRPC server, optional outbox publisher loop, and optional Redis Streams consumer loop.
-
-Shutdown behavior:
-
-- HTTP stops accepting new requests and uses a graceful shutdown timeout.
-- gRPC uses `GracefulStop` and falls back to `Stop` if graceful shutdown exceeds its timeout.
-- The outbox publisher and Redis Streams consumer derive their contexts from the same root context and exit when it is cancelled.
-- `outbox_publisher_enabled=false` and `outbox_consumer_enabled=false` remain the default, so background workers do not start unless explicitly enabled.
-
-## Database operations
-
-The current app uses GORM auto-migration during startup. The auto-migrated models include users, products, inventory, orders, order lines, and `outbox_events`.
-
-For a long-lived production database, replace startup auto-migration with explicit, reviewed migrations before scaling deployments. The outbox table should be managed by the same migration process as the order tables so event durability is not dependent on runtime schema changes.
-
-Use `docs/migrations/outbox_events.sql` as the production migration reference for the outbox table and indexes.
+The Compose defaults are for isolated local development. Production should use managed services or independently hardened stateful services and must replace all local database credentials.
 
 ## Outbox operations
 
-Order placement writes one `order.created` row to `outbox_events` in the same transaction as inventory deduction, order creation, and order-line creation.
+Order, lines, inventory deduction, and `order.created` outbox insertion commit in one PostgreSQL transaction. The publisher uses claim, commit, external publish, and short finalize transactions. Stale `processing` rows become claimable after `outbox_processing_timeout_seconds`.
 
-Current behavior:
-
-- supported publisher types are `log` and `redis_stream`
-- optional background publisher startup is controlled by `outbox_publisher_enabled`
-- default startup leaves the publisher disabled and uses `outbox_publisher_type=log`
-- Redis Streams consumer startup is separately disabled by `outbox_consumer_enabled=false`
-- pending batch claims use `FOR UPDATE SKIP LOCKED`
-- claimed rows are marked `processing` with `locked_at` and `locked_by`
-- publishing happens outside the DB transaction, then each event is finalized in a short transaction
-- stale `processing` rows older than `outbox_processing_timeout_seconds` can be claimed by a later worker run
-- the no-op/log publisher logs event metadata only and does not log payloads
-- the Redis Streams publisher writes event metadata and JSON payloads to `outbox_redis_stream_name`
-- the Redis Streams consumer foundation reads with `XREADGROUP`, uses processed-event keys by `event_id`, acknowledges success with `XACK`, claims stale pending entries with `XAUTOCLAIM`, tracks handler failures with `consumer:failures:{stream}:{group}:{eventID}`, and writes poison messages to `outbox_dead_letter_stream_name`
-
-Enable Redis Streams publishing with:
-
-```yaml
-outbox_publisher_enabled: true
-outbox_publisher_type: redis_stream
-outbox_redis_stream_name: stream:orders
-outbox_processing_timeout_seconds: 900
-```
-
-Enable Redis Streams consuming with:
-
-```yaml
-outbox_consumer_enabled: true
-outbox_consumer_group: order-events
-outbox_consumer_name: local-consumer-1
-outbox_consumer_batch_size: 10
-outbox_consumer_block_seconds: 5
-outbox_consumer_processed_ttl_seconds: 86400
-outbox_consumer_claim_min_idle_seconds: 60
-outbox_consumer_claim_batch_size: 10
-outbox_consumer_max_delivery_attempts: 5
-outbox_consumer_failure_ttl_seconds: 86400
-outbox_dead_letter_stream_name: stream:orders:dead_letter
-```
-
-Operational expectations for the publisher:
-
-- process only `pending` rows whose `next_attempt_at` is due
-- avoid holding DB row locks while publishing to Redis Streams or another broker
-- mark successful publishes as `published`
-- increment `attempts` and reschedule transient failures
-- move exhausted events to `dead_letter`
-- alert on rows stuck in `processing` longer than `outbox_processing_timeout_seconds`
-- alert on dead-letter growth
-
-The repository includes a Redis Streams consumer foundation, but the built-in handler only logs metadata and performs no real business side effects. Future handlers should process messages idempotently by `event_id`, inspect pending entries with `XPENDING`, claim stale pending entries with `XAUTOCLAIM`, and acknowledge only after successful side effects. If handling fails repeatedly, the current consumer moves the message to `stream:orders:dead_letter` after bounded retries and acknowledges the original only after the dead-letter write succeeds. Failure counters expire after `outbox_consumer_failure_ttl_seconds`. Invalid messages are dead-lettered instead of retried forever. Duplicate processed events are acknowledged without counting as failures.
-
-Useful Redis Streams checks:
-
-```bash
-redis-cli XLEN stream:orders
-redis-cli XRANGE stream:orders - + COUNT 10
-redis-cli XINFO STREAM stream:orders
-redis-cli XINFO GROUPS stream:orders
-redis-cli XINFO CONSUMERS stream:orders order-events
-redis-cli XLEN stream:orders:dead_letter
-redis-cli XRANGE stream:orders:dead_letter - + COUNT 10
-redis-cli XPENDING stream:orders order-events
-```
-
-Useful PostgreSQL outbox checks:
+Monitor:
 
 ```sql
-SELECT count(*) FROM outbox_events WHERE status = 'pending';
-SELECT count(*) FROM outbox_events WHERE status = 'processing' AND locked_at < now() - interval '15 minutes';
 SELECT status, count(*) FROM outbox_events GROUP BY status;
+SELECT count(*) FROM outbox_events
+WHERE status = 'processing'
+  AND locked_at < now() - interval '15 minutes';
 ```
 
-Application Prometheus metrics:
-
-- `outbox_publish_attempt_total`
-- `outbox_publish_success_total`
-- `outbox_publish_failure_total`
-- `outbox_publish_duration_seconds`
-- `outbox_claim_total`
-- `outbox_claim_failure_total`
-- `outbox_finalize_failure_total`
-- `outbox_consumer_read_total`
-- `outbox_consumer_ack_total`
-- `outbox_consumer_failure_total`
-- `outbox_consumer_duplicate_skipped_total`
-- `outbox_consumer_stale_claim_total`
-- `outbox_consumer_dead_letter_total`
-
-Backlog/current-state signals such as DB pending row count, oldest pending row age, Redis stream length, consumer group pending count, and DLQ length should come from SQL/Redis exporter queries or operational scripts until the application owns a dedicated sampler.
-
-Example PromQL:
-
-```promql
-histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, path))
-histogram_quantile(0.99, sum(rate(order_place_duration_seconds_bucket[5m])) by (le))
-sum(rate(order_place_failed_total[5m])) by (reason)
-sum(rate(outbox_claim_failure_total[5m])) by (reason)
-sum(rate(outbox_publish_failure_total[5m])) by (event_type, reason)
-sum(rate(outbox_finalize_failure_total[5m])) by (event_type, reason)
-increase(outbox_consumer_dead_letter_total[15m])
+```bash
+redis-cli XINFO GROUPS stream:orders
+redis-cli XPENDING stream:orders order-events
+redis-cli XLEN stream:orders:dead_letter
 ```
 
-Recommended dashboard panels:
+The built-in consumer handler records metadata only; payment, email, fulfillment, and analytics side effects are outside this release.
 
-- HTTP request rate and status mix
-- p95/p99 HTTP request latency
-- order placement rate
-- order error rate by `reason`
-- p95/p99 order latency
-- idempotency duplicate count
-- rate-limited order requests
-- outbox publish success/failure
-- outbox claim/finalize failure
-- Redis Streams consumer pending and stale-claim behavior
-- DLQ growth
+## Security and observability
 
-Alert ideas:
+- terminate TLS before the API and keep PostgreSQL/Redis on private networks
+- rotate JWT, database, and Redis credentials
+- enforce and monitor HTTP/gRPC login and registration throttling at the ingress
+- restrict `/metrics` and Swagger to trusted networks in production
+- keep logs free of passwords, JWTs, idempotency keys, request payloads, Redis credentials, and DSNs
+- keep Prometheus labels bounded to normalized route/status/result categories
+- understand that refresh tokens are not per-session or one-time-use in this release
+- review Govulncheck, Gitleaks, and Trivy output before promotion
 
-- sustained DLQ growth
-- rising insufficient stock conflicts
-- outbox publish failure spike
-- outbox claim/finalize failure spike
-- consumer failure spike
-- high p99 latency
-- Redis stream pending growth or DB `processing` rows older than the configured timeout
+Staticcheck covers all packages, including generated protobuf code. The checked-in protobuf files are generated with `protoc-gen-go` v1.36.11 and `protoc-gen-go-grpc` v1.6.2 so the release gate does not need a generated-code exclusion.
 
-Label cardinality rules:
+## Rollout
 
-- allowed labels: `method`, `path`, `status`, `event_type`, `result`, and `reason`
-- use normalized route patterns, not raw URL paths
-- never label by user ID, order ID, event ID, idempotency key, raw Redis key, JWT claims, or payload contents
+1. Confirm the release branch and image digest were built from a reviewed commit.
+2. Confirm CI, race, vulnerability, secret, workflow, migration, and image gates are green.
+3. Back up PostgreSQL and record the current migration version.
+4. Apply migrations with the pinned migration job.
+5. Deploy one API replica and verify `/livez` and `/readyz`.
+6. Exercise login, authorization, idempotent order placement, and limited stock.
+7. Scale replicas within the connection budget.
+8. Watch 5xx, p95/p99, pool usage, outbox failures, pending entries, and DLQ growth.
 
-## Security checklist
+## Rollback
 
-- Keep `auth_secret` in a secret manager.
-- Use TLS at the edge.
-- Keep Redis private to the application network.
-- Keep PostgreSQL private to the application network.
-- Rotate credentials regularly.
-- Set resource limits for containers.
-- Keep Go and base images patched.
-- Run `go test ./...` in CI before deploying.
-
-## Rollout checklist
-
-1. Build the image from a reviewed commit.
-2. Run CI tests.
-3. Apply database migrations.
-4. Deploy the API with new configuration.
-5. Verify `/health`.
-6. Verify `/metrics` from the Prometheus network path if metrics are enabled.
-7. Run a smoke test for login and order placement.
-8. Verify that successful order placement creates one pending `order.created` outbox row.
-9. If Redis Streams publishing is enabled, verify that the row is claimed as `processing`, `stream:orders` receives an entry, and the outbox row is finalized as `published`.
-10. If Redis Streams consuming is enabled, verify that group `order-events` exists and messages are acknowledged after the log/no-op handler succeeds.
-11. Verify `XLEN stream:orders:dead_letter`, `XRANGE stream:orders:dead_letter - +`, and `XPENDING stream:orders order-events` during rollout.
-12. Monitor order failure logs, rate-limited counts, outbox dead-letter counts, stream length, pending entries, stale claims, duplicate skips, metrics scrape health, and latency.
-13. Roll back if error rate, outbox failures, consumer failures, dead-letter growth, metrics scrape failures, or latency exceed the deployment threshold.
+1. Stop further rollout and route traffic to the previously accepted image.
+2. Keep the forward-compatible schema whenever possible.
+3. Run `migrate down 1` only after reviewing data loss and old-image compatibility.
+4. Restore PostgreSQL from backup if a destructive migration has already changed retained data.
+5. Recheck `/livez`, `/readyz`, order placement, inventory, and outbox processing.
+6. Document the failed revision and leave the release tag unchanged until a corrected build passes all gates.

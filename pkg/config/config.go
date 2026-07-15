@@ -3,8 +3,10 @@ package config
 import (
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,7 +15,11 @@ import (
 )
 
 const (
-	ProductionEnv = "production"
+	DevelopmentEnv = "development"
+	TestEnv        = "test"
+	ProductionEnv  = "production"
+
+	MinimumProductionAuthSecretBytes = 32
 
 	DatabaseTimeout    = 5 * time.Second
 	ProductCachingTime = 1 * time.Minute
@@ -47,22 +53,29 @@ const (
 	DefaultOutboxConsumerMaxDeliveryAttempts = 5
 	DefaultOutboxConsumerFailureTTLSeconds   = 24 * 60 * 60
 	DefaultOutboxDeadLetterStreamName        = "stream:orders:dead_letter"
+	DefaultDatabaseMaxOpenConns              = 25
+	DefaultDatabaseMaxIdleConns              = 5
+	DefaultDatabaseConnMaxLifetimeSeconds    = 5 * 60
+	DefaultDatabaseConnMaxIdleTimeSeconds    = 60
 )
 
-var AuthIgnoreMethods = []string{
-	"/user.UserService/Login",
-	"/user.UserService/Register",
-}
-
 type Schema struct {
-	Environment   string `env:"environment"`
-	HttpPort      int    `env:"http_port"`
-	GrpcPort      int    `env:"grpc_port"`
-	AuthSecret    string `env:"auth_secret"`
-	DatabaseURI   string `env:"database_uri"`
-	RedisURI      string `env:"redis_uri"`
-	RedisPassword string `env:"redis_password"`
-	RedisDB       int    `env:"redis_db"`
+	Environment           string `env:"environment"`
+	HttpPort              int    `env:"http_port"`
+	GrpcPort              int    `env:"grpc_port"`
+	AuthSecret            string `env:"auth_secret"`
+	DatabaseURI           string `env:"database_uri"`
+	RedisURI              string `env:"redis_uri"`
+	RedisPassword         string `env:"redis_password"`
+	RedisDB               int    `env:"redis_db"`
+	GRPCReflectionEnabled string `env:"grpc_reflection_enabled"`
+	SwaggerEnabled        string `env:"swagger_enabled"`
+
+	DatabaseAutoMigrate            bool `env:"database_auto_migrate"`
+	DatabaseMaxOpenConns           int  `env:"database_max_open_conns"`
+	DatabaseMaxIdleConns           int  `env:"database_max_idle_conns"`
+	DatabaseConnMaxLifetimeSeconds int  `env:"database_conn_max_lifetime_seconds"`
+	DatabaseConnMaxIdleTimeSeconds int  `env:"database_conn_max_idle_time_seconds"`
 
 	HTTPReadTimeoutSeconds       int    `env:"http_read_timeout_seconds"`
 	HTTPWriteTimeoutSeconds      int    `env:"http_write_timeout_seconds"`
@@ -70,7 +83,7 @@ type Schema struct {
 	HTTPReadHeaderTimeoutSeconds int    `env:"http_read_header_timeout_seconds"`
 	HTTPMaxHeaderBytes           int    `env:"http_max_header_bytes"`
 	MaxRequestBodyBytes          int64  `env:"max_request_body_bytes"`
-	MetricsEnabled               *bool  `env:"metrics_enabled"`
+	MetricsEnabled               string `env:"metrics_enabled"`
 	MetricsPath                  string `env:"metrics_path"`
 
 	OrderIdempotencyTTLSeconds  int   `env:"order_idempotency_ttl_seconds"`
@@ -104,37 +117,107 @@ var (
 )
 
 func LoadConfig() *Schema {
-	_, filename, _, _ := runtime.Caller(0)
-	currentDir := filepath.Dir(filename)
-
-	err := godotenv.Load(filepath.Join(currentDir, "config.yaml"))
-	if err != nil {
-		log.Printf("Error on load configuration file, error: %v", err)
+	if os.Getenv("environment") != ProductionEnv {
+		_, filename, _, _ := runtime.Caller(0)
+		currentDir := filepath.Dir(filename)
+		if err := godotenv.Load(filepath.Join(currentDir, "config.yaml")); err != nil {
+			log.Printf("Error on load configuration file, error: %v", err)
+		}
 	}
 
 	if err := env.Parse(&cfg); err != nil {
 		log.Fatalf("Error on parsing configuration file, error: %v", err)
 	}
-	if err := validateConfig(cfg); err != nil {
+	if err := Validate(cfg); err != nil {
 		log.Fatalf("Invalid configuration, error: %v", err)
 	}
 
 	return &cfg
 }
 
-func validateConfig(cfg Schema) error {
+func Validate(cfg Schema) error {
+	switch cfg.Environment {
+	case DevelopmentEnv, TestEnv, ProductionEnv:
+	default:
+		return fmt.Errorf("environment must be one of development, test, or production")
+	}
+	if err := validateDatabasePoolConfig(cfg); err != nil {
+		return err
+	}
+	if err := validateOptionalBool("metrics_enabled", cfg.MetricsEnabled); err != nil {
+		return err
+	}
+	if err := validateOptionalBool("grpc_reflection_enabled", cfg.GRPCReflectionEnabled); err != nil {
+		return err
+	}
+	if err := validateOptionalBool("swagger_enabled", cfg.SwaggerEnabled); err != nil {
+		return err
+	}
 	if cfg.Environment != ProductionEnv {
 		return nil
 	}
 	if isPlaceholderAuthSecret(cfg.AuthSecret) {
 		return fmt.Errorf("production auth_secret must be set to a non-placeholder value")
 	}
+	if len([]byte(strings.TrimSpace(cfg.AuthSecret))) < MinimumProductionAuthSecretBytes {
+		return fmt.Errorf("production auth_secret must be at least %d bytes", MinimumProductionAuthSecretBytes)
+	}
+	if cfg.HttpPort <= 0 {
+		return fmt.Errorf("production http_port must be greater than zero")
+	}
+	if cfg.GrpcPort <= 0 {
+		return fmt.Errorf("production grpc_port must be greater than zero")
+	}
+	if strings.TrimSpace(cfg.DatabaseURI) == "" {
+		return fmt.Errorf("production database_uri is required")
+	}
+	if strings.TrimSpace(cfg.RedisURI) == "" {
+		return fmt.Errorf("production redis_uri is required")
+	}
+	if cfg.DatabaseAutoMigrate {
+		return fmt.Errorf("production database_auto_migrate must be false")
+	}
+	return nil
+}
+
+func validateOptionalBool(name, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	if _, err := strconv.ParseBool(value); err != nil {
+		return fmt.Errorf("%s must be true or false", name)
+	}
+	return nil
+}
+
+func validateDatabasePoolConfig(cfg Schema) error {
+	values := []struct {
+		name  string
+		value int
+	}{
+		{name: "database_max_open_conns", value: cfg.DatabaseMaxOpenConns},
+		{name: "database_max_idle_conns", value: cfg.DatabaseMaxIdleConns},
+		{name: "database_conn_max_lifetime_seconds", value: cfg.DatabaseConnMaxLifetimeSeconds},
+		{name: "database_conn_max_idle_time_seconds", value: cfg.DatabaseConnMaxIdleTimeSeconds},
+	}
+	for _, item := range values {
+		if item.value < 0 {
+			return fmt.Errorf("%s must not be negative", item.name)
+		}
+	}
+
+	maxOpen := intOrDefault(cfg.DatabaseMaxOpenConns, DefaultDatabaseMaxOpenConns)
+	maxIdle := intOrDefault(cfg.DatabaseMaxIdleConns, DefaultDatabaseMaxIdleConns)
+	if maxIdle > maxOpen {
+		return fmt.Errorf("database_max_idle_conns must not exceed database_max_open_conns")
+	}
+
 	return nil
 }
 
 func isPlaceholderAuthSecret(secret string) bool {
 	switch strings.ToLower(strings.TrimSpace(secret)) {
-	case "", "######", "auth_secret", "secret", "change-me", "changeme", "local-dev-secret":
+	case "", "######", "auth_secret", "secret", "change-me", "changeme", "local-dev-secret", "replace-with-a-random-secret":
 		return true
 	default:
 		return false
@@ -143,6 +226,26 @@ func isPlaceholderAuthSecret(secret string) bool {
 
 func GetConfig() *Schema {
 	return &cfg
+}
+
+func DatabaseAutoMigrate() bool {
+	return cfg.DatabaseAutoMigrate
+}
+
+func DatabaseMaxOpenConns() int {
+	return intOrDefault(cfg.DatabaseMaxOpenConns, DefaultDatabaseMaxOpenConns)
+}
+
+func DatabaseMaxIdleConns() int {
+	return intOrDefault(cfg.DatabaseMaxIdleConns, DefaultDatabaseMaxIdleConns)
+}
+
+func DatabaseConnMaxLifetime() time.Duration {
+	return secondsOrDefault(cfg.DatabaseConnMaxLifetimeSeconds, DefaultDatabaseConnMaxLifetimeSeconds)
+}
+
+func DatabaseConnMaxIdleTime() time.Duration {
+	return secondsOrDefault(cfg.DatabaseConnMaxIdleTimeSeconds, DefaultDatabaseConnMaxIdleTimeSeconds)
 }
 
 func HTTPReadTimeout() time.Duration {
@@ -176,10 +279,27 @@ func MaxRequestBodyBytes() int64 {
 }
 
 func MetricsEnabled() bool {
-	if cfg.MetricsEnabled == nil {
-		return true
+	if strings.TrimSpace(cfg.MetricsEnabled) == "" {
+		return cfg.Environment != ProductionEnv
 	}
-	return *cfg.MetricsEnabled
+	enabled, _ := strconv.ParseBool(cfg.MetricsEnabled)
+	return enabled
+}
+
+func GRPCReflectionEnabled() bool {
+	if strings.TrimSpace(cfg.GRPCReflectionEnabled) != "" {
+		enabled, _ := strconv.ParseBool(cfg.GRPCReflectionEnabled)
+		return enabled
+	}
+	return cfg.Environment != ProductionEnv
+}
+
+func SwaggerEnabled() bool {
+	if strings.TrimSpace(cfg.SwaggerEnabled) != "" {
+		enabled, _ := strconv.ParseBool(cfg.SwaggerEnabled)
+		return enabled
+	}
+	return cfg.Environment != ProductionEnv
 }
 
 func MetricsPath() string {
@@ -315,4 +435,11 @@ func secondsOrDefault(value, defaultValue int) time.Duration {
 		value = defaultValue
 	}
 	return time.Duration(value) * time.Second
+}
+
+func intOrDefault(value, defaultValue int) int {
+	if value == 0 {
+		return defaultValue
+	}
+	return value
 }

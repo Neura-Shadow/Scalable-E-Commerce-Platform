@@ -2,8 +2,7 @@ package middleware
 
 import (
 	"context"
-	"encoding/json"
-	"log"
+	"strings"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -14,13 +13,32 @@ import (
 )
 
 type AuthInterceptor struct {
-	ignoredMethods []string
+	ignoredMethods      map[string]struct{}
+	refreshTokenMethods map[string]struct{}
 }
 
-func NewAuthInterceptor(ignoredMethods []string) *AuthInterceptor {
-	return &AuthInterceptor{
-		ignoredMethods: ignoredMethods,
+type AuthInterceptorOption func(*AuthInterceptor)
+
+func WithRefreshTokenMethods(methods []string) AuthInterceptorOption {
+	return func(interceptor *AuthInterceptor) {
+		for _, method := range methods {
+			interceptor.refreshTokenMethods[method] = struct{}{}
+		}
 	}
+}
+
+func NewAuthInterceptor(ignoredMethods []string, options ...AuthInterceptorOption) *AuthInterceptor {
+	interceptor := &AuthInterceptor{
+		ignoredMethods:      make(map[string]struct{}, len(ignoredMethods)),
+		refreshTokenMethods: make(map[string]struct{}),
+	}
+	for _, method := range ignoredMethods {
+		interceptor.ignoredMethods[method] = struct{}{}
+	}
+	for _, option := range options {
+		option(interceptor)
+	}
+	return interceptor
 }
 
 func (ai *AuthInterceptor) Unary() grpc.UnaryServerInterceptor {
@@ -30,44 +48,50 @@ func (ai *AuthInterceptor) Unary() grpc.UnaryServerInterceptor {
 		info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
 	) (interface{}, error) {
-		for _, m := range ai.ignoredMethods {
-			if info.FullMethod == m {
-				return handler(ctx, req)
-			}
+		if _, ignored := ai.ignoredMethods[info.FullMethod]; ignored {
+			return handler(ctx, req)
 		}
 
-		ctx, userID, err := ai.authorize(ctx)
+		userID, tokenVersion, err := ai.authorize(ctx, ai.expectedTokenType(info.FullMethod))
 		if err != nil {
-			return nil, status.New(codes.Internal, err.Error()).Err()
+			return nil, err
 		}
 
-		// attach "userId" to context
-		ctx = context.WithValue(ctx, "userId", userID)
+		ctx = ContextWithUserID(ctx, userID)
+		ctx = ContextWithTokenVersion(ctx, tokenVersion)
 
 		return handler(ctx, req)
 	}
 }
 
-func (ai *AuthInterceptor) authorize(ctx context.Context) (context.Context, string, error) {
+func (ai *AuthInterceptor) expectedTokenType(method string) string {
+	if _, ok := ai.refreshTokenMethods[method]; ok {
+		return jtoken.RefreshTokenType
+	}
+	return jtoken.AccessTokenType
+}
+
+func (ai *AuthInterceptor) authorize(ctx context.Context, expectedTokenType string) (string, uint64, error) {
 	m, ok := metadata.FromIncomingContext(ctx)
 	if !ok || len(m["token"]) == 0 {
-		return ctx, "", status.New(codes.Unauthenticated, "missing token").Err()
+		return "", 0, status.Error(codes.Unauthenticated, "missing token")
 	}
 
 	payload, err := jtoken.ValidateToken(m["token"][0])
 	if err != nil {
-		return ctx, "", status.New(codes.Unauthenticated, "unauthorized").Err()
+		return "", 0, status.Error(codes.Unauthenticated, "unauthorized")
 	}
-
-	var meta map[string]interface{}
-	b, err := json.Marshal(payload)
+	tokenType, ok := payload["type"].(string)
+	if !ok || tokenType != expectedTokenType {
+		return "", 0, status.Error(codes.Unauthenticated, "unauthorized")
+	}
+	userID, ok := payload["id"].(string)
+	if !ok || strings.TrimSpace(userID) == "" {
+		return "", 0, status.Error(codes.Unauthenticated, "unauthorized")
+	}
+	tokenVersion, err := jtoken.TokenVersion(payload)
 	if err != nil {
-		return ctx, "", status.New(codes.Unauthenticated, "unauthorized").Err()
-	} else {
-		if err := json.Unmarshal(b, &meta); err != nil {
-			log.Println("Error while unmarshalling auth data", err)
-		}
+		return "", 0, status.Error(codes.Unauthenticated, "unauthorized")
 	}
-
-	return ctx, payload["id"].(string), nil
+	return userID, tokenVersion, nil
 }

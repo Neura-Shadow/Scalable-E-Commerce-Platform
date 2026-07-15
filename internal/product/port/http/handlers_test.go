@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/quangdangfit/gocommon/logger"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 
@@ -17,6 +19,7 @@ import (
 	"goshop/internal/product/model"
 	srvMocks "goshop/internal/product/service/mocks"
 	"goshop/pkg/config"
+	"goshop/pkg/money"
 	"goshop/pkg/paging"
 	redisMocks "goshop/pkg/redis/mocks"
 	"goshop/pkg/response"
@@ -42,6 +45,39 @@ func TestProductHandlerTestSuite(t *testing.T) {
 	suite.Run(t, new(ProductHandlerTestSuite))
 }
 
+func TestProductListCacheKeyNormalizesEquivalentQueries(t *testing.T) {
+	first := &dto.ListProductReq{
+		Name:      "keyboard",
+		Page:      2,
+		Limit:     25,
+		OrderBy:   "price",
+		OrderDesc: true,
+	}
+	second := &dto.ListProductReq{
+		OrderDesc: true,
+		Limit:     25,
+		Name:      "keyboard",
+		OrderBy:   "price",
+		Page:      2,
+	}
+
+	assert.Equal(t, productListCacheKey(7, first), productListCacheKey(7, second))
+}
+
+func TestProductListCacheKeySeparatesVersionsFiltersAndPages(t *testing.T) {
+	base := &dto.ListProductReq{Name: "keyboard", Page: 1, Limit: 20}
+	differentFilter := &dto.ListProductReq{Name: "monitor", Page: 1, Limit: 20}
+	differentPage := &dto.ListProductReq{Name: "keyboard", Page: 2, Limit: 20}
+
+	assert.NotEqual(t, productListCacheKey(1, base), productListCacheKey(1, differentFilter))
+	assert.NotEqual(t, productListCacheKey(1, base), productListCacheKey(1, differentPage))
+	assert.NotEqual(t, productListCacheKey(1, base), productListCacheKey(2, base))
+}
+
+func TestProductDetailCacheKeyUsesExactProductID(t *testing.T) {
+	assert.Equal(t, "cache:product:product-123", productDetailCacheKey("product-123"))
+}
+
 func (suite *ProductHandlerTestSuite) prepareContext(path string, body any) (*gin.Context, *httptest.ResponseRecorder) {
 	requestBody, _ := json.Marshal(body)
 	w := httptest.NewRecorder()
@@ -52,13 +88,25 @@ func (suite *ProductHandlerTestSuite) prepareContext(path string, body any) (*gi
 	return c, w
 }
 
+func (suite *ProductHandlerTestSuite) expectProductListVersion(version int64, err error) {
+	suite.mockRedis.
+		On("Get", productListCacheVersionKey, mock.AnythingOfType("*int64")).
+		Run(func(args mock.Arguments) {
+			value := args.Get(1).(*int64)
+			*value = version
+		}).
+		Return(err).
+		Times(1)
+}
+
 // GetProductByID
 // =================================================================================================
 
 func (suite *ProductHandlerTestSuite) TestGetProductByIDSuccessfullyFromDatabase() {
 	ctx, writer := suite.prepareContext("/api/v1/products/123456", nil)
+	ctx.Params = []gin.Param{{Key: "id", Value: "123456"}}
 
-	suite.mockRedis.On("Get", mock.Anything, &dto.Product{}).Return(errors.New("not found")).Times(1)
+	suite.mockRedis.On("Get", productDetailCacheKey("123456"), &dto.Product{}).Return(errors.New("not found")).Times(1)
 	suite.mockService.On("GetProductByID", mock.Anything, mock.Anything).
 		Return(
 			&model.Product{
@@ -85,8 +133,9 @@ func (suite *ProductHandlerTestSuite) TestGetProductByIDSuccessfullyFromDatabase
 
 func (suite *ProductHandlerTestSuite) TestGetProductByIDSuccessfullyFromCache() {
 	ctx, writer := suite.prepareContext("/api/v1/products/123456", nil)
+	ctx.Params = []gin.Param{{Key: "id", Value: "123456"}}
 
-	suite.mockRedis.On("Get", mock.Anything, &dto.Product{}).Return(nil).Times(1)
+	suite.mockRedis.On("Get", productDetailCacheKey("123456"), &dto.Product{}).Return(nil).Times(1)
 
 	suite.handler.GetProductByID(ctx)
 
@@ -103,8 +152,9 @@ func (suite *ProductHandlerTestSuite) TestGetProductByIDSuccessfullyFromCache() 
 
 func (suite *ProductHandlerTestSuite) TestGetProductByIDFail() {
 	ctx, writer := suite.prepareContext("/api/v1/products/123456", nil)
+	ctx.Params = []gin.Param{{Key: "id", Value: "123456"}}
 
-	suite.mockRedis.On("Get", mock.Anything, &dto.Product{}).Return(errors.New("not found")).Times(1)
+	suite.mockRedis.On("Get", productDetailCacheKey("123456"), &dto.Product{}).Return(errors.New("not found")).Times(1)
 	suite.mockService.On("GetProductByID", mock.Anything, mock.Anything).
 		Return(nil, errors.New("error")).Times(1)
 
@@ -118,7 +168,8 @@ func (suite *ProductHandlerTestSuite) TestGetProductByIDFail() {
 func (suite *ProductHandlerTestSuite) TestListProductsSuccessfullyFromDatabase() {
 	ctx, writer := suite.prepareContext("/api/v1/products", nil)
 
-	suite.mockRedis.On("Get", mock.Anything, &dto.ListProductRes{}).Return(errors.New("not found")).Times(1)
+	suite.expectProductListVersion(0, errors.New("not found"))
+	suite.mockRedis.On("Get", productListCacheKey(0, &dto.ListProductReq{}), &dto.ListProductRes{}).Return(errors.New("not found")).Times(1)
 	suite.mockService.On("ListProducts", mock.Anything, mock.Anything).
 		Return(
 			[]*model.Product{
@@ -150,7 +201,8 @@ func (suite *ProductHandlerTestSuite) TestListProductsSuccessfullyFromDatabase()
 func (suite *ProductHandlerTestSuite) TestListProductsSuccessfullyFromCache() {
 	ctx, writer := suite.prepareContext("/api/v1/products", nil)
 
-	suite.mockRedis.On("Get", mock.Anything, &dto.ListProductRes{}).Return(nil).Times(1)
+	suite.expectProductListVersion(7, nil)
+	suite.mockRedis.On("Get", productListCacheKey(7, &dto.ListProductReq{}), &dto.ListProductRes{}).Return(nil).Times(1)
 
 	suite.handler.ListProducts(ctx)
 
@@ -172,7 +224,8 @@ func (suite *ProductHandlerTestSuite) TestListProductsInvalidQuery() {
 func (suite *ProductHandlerTestSuite) TestListProductsFail() {
 	ctx, writer := suite.prepareContext("/api/v1/products", nil)
 
-	suite.mockRedis.On("Get", mock.Anything, &dto.ListProductRes{}).Return(errors.New("not found")).Times(1)
+	suite.expectProductListVersion(0, errors.New("not found"))
+	suite.mockRedis.On("Get", productListCacheKey(0, &dto.ListProductReq{}), &dto.ListProductRes{}).Return(errors.New("not found")).Times(1)
 	suite.mockService.On("ListProducts", mock.Anything, mock.Anything).
 		Return(nil, nil, errors.New("error")).Times(1)
 
@@ -200,7 +253,7 @@ func (suite *ProductHandlerTestSuite) TestCreateProductSuccess() {
 			},
 			nil,
 		).Times(1)
-	suite.mockRedis.On("RemovePattern", "*product*").Return(nil).Times(1)
+	suite.mockRedis.On("IncrementWithExpiration", productListCacheVersionKey, time.Duration(0)).Return(int64(1), nil).Times(1)
 
 	suite.handler.CreateProduct(ctx)
 
@@ -251,6 +304,19 @@ func (suite *ProductHandlerTestSuite) TestCreateProductFail() {
 	suite.Equal("Something went wrong", res["error"]["message"])
 }
 
+func (suite *ProductHandlerTestSuite) TestCreateProductRejectsInvalidPricePrecision() {
+	req := &dto.CreateProductReq{Name: "product", Description: "description", Price: 1.001}
+	ctx, writer := suite.prepareContext("/api/v1/products", req)
+	suite.mockService.On("Create", mock.Anything, mock.Anything).Return(nil, money.ErrInvalidAmount).Once()
+
+	suite.handler.CreateProduct(ctx)
+
+	var res map[string]map[string]string
+	_ = json.Unmarshal(writer.Body.Bytes(), &res)
+	suite.Equal(http.StatusBadRequest, writer.Code)
+	suite.Equal("Invalid price", res["error"]["message"])
+}
+
 // UpdateProduct
 // =================================================================================================
 
@@ -262,6 +328,7 @@ func (suite *ProductHandlerTestSuite) TestUpdateProductSuccess() {
 	}
 
 	ctx, writer := suite.prepareContext("/api/v1/products/123456", req)
+	ctx.Params = []gin.Param{{Key: "id", Value: "123456"}}
 
 	suite.mockService.On("Update", mock.Anything, mock.Anything, req).
 		Return(
@@ -273,7 +340,8 @@ func (suite *ProductHandlerTestSuite) TestUpdateProductSuccess() {
 			},
 			nil,
 		).Times(1)
-	suite.mockRedis.On("RemovePattern", "*product*").Return(nil).Times(1)
+	suite.mockRedis.On("Remove", productDetailCacheKey("123456")).Return(nil).Times(1)
+	suite.mockRedis.On("IncrementWithExpiration", productListCacheVersionKey, time.Duration(0)).Return(int64(1), nil).Times(1)
 
 	suite.handler.UpdateProduct(ctx)
 

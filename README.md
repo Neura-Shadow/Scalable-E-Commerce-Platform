@@ -25,14 +25,17 @@ HTTP handler -> order service -> repository/inventory/product ports -> GORM/Redi
 
 - Gin REST API and gRPC service skeletons.
 - PostgreSQL persistence with GORM.
-- Redis product caching.
+- Versioned Redis product-list caching and exact product-detail cache keys.
 - JWT authentication with access and refresh tokens.
 - Admin-only product and inventory write routes.
 - Customer order ownership checks.
 - Transaction-safe order placement.
 - Atomic inventory deduction to prevent overselling.
-- Idempotent `POST /orders` with Redis and `Idempotency-Key`.
-- Redis-backed order-placement rate limiting.
+- Durable idempotent `POST /orders` with PostgreSQL uniqueness, request fingerprints, Redis acceleration, and `Idempotency-Key`.
+- Redis-backed order-placement rate limiting with atomic increment-and-expiration.
+- Explicit versioned PostgreSQL migrations with production `AutoMigrate` disabled.
+- Separate `/livez` and dependency-aware `/readyz` health endpoints.
+- Validated, configurable PostgreSQL connection-pool settings.
 - Transactional outbox foundation for `order.created` events.
 - Optional log or Redis Streams outbox publisher worker with retry and dead-letter bookkeeping.
 - Optional Redis Streams consumer group foundation with idempotent event processing, bounded failure tracking, and poison-message dead-letter handling.
@@ -69,11 +72,19 @@ Clients can send:
 Idempotency-Key: checkout-attempt-123
 ```
 
-Keys are scoped by authenticated user ID and stored in Redis with a TTL. Duplicate successful requests return the original order instead of creating another one.
+Keys are scoped by authenticated user ID. A SHA-256 key digest and normalized request fingerprint are committed with the order under a PostgreSQL unique index; Redis provides the in-flight reservation and fast replay cache. Duplicate successful requests return the original order even after the Redis record expires or cannot be completed, while reusing a key with a different request returns `409`.
+
+Product prices are limited to two decimal places. Order line totals and order totals are calculated in integer minor units before conversion to the API and PostgreSQL decimal representation.
 
 ### Request Protection
 
 `POST /orders` is protected by a Redis-backed per-user rate limit. Defaults are documented in `pkg/config/config.sample.yaml` and `docs/order-production-readiness.md`.
+
+The counter uses one Redis Lua operation to increment and set the first TTL. It also repairs a legacy counter that has no TTL without extending an existing positive TTL window. Correctness no longer depends on separate `INCR` and `EXPIRE` commands. Checkout remains fail-open if Redis is temporarily unavailable.
+
+### Product Cache Safety
+
+Product details use `cache:product:{productID}`. Product lists use a normalized query hash under `cache:products:v{version}:{hash}`. Creates and updates increment `cache:products:version`; updates also delete the exact detail key. Old list entries expire naturally, and production request paths never use Redis `KEYS`.
 
 ### Transactional Outbox
 
@@ -138,7 +149,7 @@ Monitor duplicate skip counts from consumer batch logs and alert on sustained de
 
 ### Prometheus Metrics
 
-The API exposes a lightweight Prometheus-style endpoint at `/metrics` by default:
+The API exposes a lightweight Prometheus-style endpoint at `/metrics` by default in development. Production disables it unless explicitly enabled:
 
 ```yaml
 metrics_enabled: true
@@ -169,14 +180,23 @@ Important metric families include HTTP request totals/durations, order placement
 
 Requirements:
 
-- Go 1.17+
+- Go 1.26.5+
 - Docker Desktop or Docker Engine
 - Docker Compose
 
-Start infrastructure:
+Set the Compose substitutions and start infrastructure. The secret is still required for Compose interpolation even when the application profile is not selected:
 
 ```bash
+export DATABASE_URI="postgres://postgres:postgres@postgres:5432/goshop_test?sslmode=disable"
+export AUTH_SECRET="$(openssl rand -hex 32)"
 docker compose -f docker-compose.yml up -d
+```
+
+Install the pinned migration CLI and create the schema:
+
+```bash
+go install -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@v4.18.3
+migrate -path migrations -database "postgres://postgres:postgres@localhost:5432/goshop_test?sslmode=disable" up
 ```
 
 Create local config:
@@ -196,6 +216,7 @@ database_uri: postgres://postgres:postgres@localhost:5432/goshop_test
 redis_uri: localhost:6379
 redis_password:
 redis_db: 0
+database_auto_migrate: false
 ```
 
 Run the API:
@@ -204,19 +225,30 @@ Run the API:
 go run cmd/api/main.go
 ```
 
-Health check:
+Health checks:
 
 ```bash
-curl http://localhost:8888/health
+curl http://localhost:8888/livez
+curl http://localhost:8888/readyz
 ```
 
-Prometheus metrics:
+`/health` remains an alias of `/livez` for compatibility. `/readyz` checks PostgreSQL, Redis, production configuration, all eight application tables, and a clean migration version compatible with the application's minimum version 5 without returning connection strings or raw errors.
+
+Run the complete container stack with an environment-supplied secret:
+
+```bash
+DATABASE_URI="postgres://postgres:postgres@postgres:5432/goshop_test?sslmode=disable" \
+AUTH_SECRET="$(openssl rand -hex 32)" \
+docker compose --profile application up -d --build
+```
+
+Prometheus metrics, when `metrics_enabled=true`:
 
 ```bash
 curl http://localhost:8888/metrics
 ```
 
-Swagger UI:
+Swagger UI, when `swagger_enabled=true`:
 
 ```text
 http://localhost:8888/swagger/index.html
@@ -241,6 +273,8 @@ Run vet checks:
 ```bash
 go vet ./...
 ```
+
+Release CI also runs the race detector, Staticcheck, Govulncheck, Actionlint, Gitleaks, Trivy filesystem/image scans, a migration-up gate, and a Docker build.
 
 ## API Examples
 
@@ -284,9 +318,11 @@ curl -X PUT http://localhost:8888/api/v1/inventory/<product_id> \
 - `docs/order-transaction-safety.md`: transaction boundary and overselling prevention.
 - `docs/order-production-readiness.md`: idempotency, rate limiting, HTTP hardening, and Prometheus observability.
 - `docs/load-testing.md`: load, concurrency, and optional outbox publisher testing guidance.
+- `docs/benchmark-report-v1.md`: measured local smoke results and explicit measurement gaps.
 - `docs/production-deployment.md`: production deployment checklist and operational notes.
 - `docs/order-outbox-pattern.md`: transactional outbox foundation, Redis Streams publishing, and consumer group foundation.
-- `docs/migrations/outbox_events.sql`: production-style outbox table and index migration reference.
+- `docs/release-checklist-v1.md`: v1.0.0 release and rollback gate.
+- `migrations/`: authoritative versioned PostgreSQL schema migrations.
 
 ## Production-Readiness Notes
 
@@ -297,6 +333,9 @@ curl -X PUT http://localhost:8888/api/v1/inventory/<product_id> \
 - Expose `/metrics` only to trusted Prometheus scrapers or behind a restricted reverse proxy in production.
 - Let the root process context handle `SIGINT`/`SIGTERM`; HTTP, gRPC, publisher, and consumer loops all exit through the coordinated lifecycle path.
 - Tune order rate limits to match real checkout traffic.
-- Add persistent migrations before using this project for a long-lived production database.
-- Move the auto-migrated `outbox_events` table to explicit migrations before long-lived production use.
+- Keep `database_auto_migrate=false` in production and apply reviewed migrations before deploying the API.
+- Enforce account/source-aware throttling for HTTP and gRPC login/registration at the ingress; application-level auth throttling is not included in this release.
+- Treat refresh tokens as 30-day bearer credentials. Password change revokes all existing refresh tokens through the user token version, but per-session rotation/logout is not implemented.
 - Use the Redis Streams outbox publisher and consumer foundation when order events must leave the database, and add real business side-effect handlers before treating downstream processing as complete.
+
+This is a production-minded, single-region e-commerce backend. It is not a multi-region active-active system and makes no national-scale or railway-capacity claim. Redis Cluster, cross-region caching, database sharding, and multi-region failover are not implemented.

@@ -9,6 +9,7 @@ import (
 	"github.com/quangdangfit/gocommon/validation"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
+	"golang.org/x/crypto/bcrypt"
 
 	"goshop/internal/user/dto"
 	"goshop/internal/user/model"
@@ -33,6 +34,15 @@ func (suite *UserServiceTestSuite) SetupTest() {
 
 func TestUserServiceTestSuite(t *testing.T) {
 	suite.Run(t, new(UserServiceTestSuite))
+}
+
+func mustHashPassword(t *testing.T, password string) string {
+	t.Helper()
+	hashed, err := utils.HashAndSalt([]byte(password))
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	return hashed
 }
 
 // Login
@@ -94,7 +104,7 @@ func (suite *UserServiceTestSuite) TestLoginSuccess() {
 		Return(
 			&model.User{
 				Email:    "test@test.com",
-				Password: utils.HashAndSalt([]byte("test123456")),
+				Password: mustHashPassword(suite.T(), "test123456"),
 			},
 			nil,
 		).Times(1)
@@ -107,6 +117,26 @@ func (suite *UserServiceTestSuite) TestLoginSuccess() {
 	suite.Nil(err)
 }
 
+func (suite *UserServiceTestSuite) TestLoginUpgradesLegacyBcryptCost() {
+	req := &dto.LoginReq{Email: "legacy@test.com", Password: "test123456"}
+	legacyHash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.MinCost)
+	suite.Require().NoError(err)
+	user := &model.User{Email: req.Email, Password: string(legacyHash)}
+
+	suite.mockRepo.On("GetUserByEmail", mock.Anything, req.Email).Return(user, nil).Once()
+	suite.mockRepo.On("Update", mock.Anything, mock.MatchedBy(func(updated *model.User) bool {
+		cost, costErr := bcrypt.Cost([]byte(updated.Password))
+		return costErr == nil && cost == bcrypt.DefaultCost
+	})).Return(nil).Once()
+
+	loggedIn, accessToken, refreshToken, err := suite.service.Login(context.Background(), req)
+
+	suite.Require().NoError(err)
+	suite.Same(user, loggedIn)
+	suite.NotEmpty(accessToken)
+	suite.NotEmpty(refreshToken)
+}
+
 // Register
 // =================================================================
 
@@ -115,7 +145,9 @@ func (suite *UserServiceTestSuite) TestRegisterSuccess() {
 		Email:    "test@test.com",
 		Password: "test123456",
 	}
-	suite.mockRepo.On("Create", mock.Anything, mock.Anything).
+	suite.mockRepo.On("Create", mock.Anything, mock.MatchedBy(func(user *model.User) bool {
+		return user.Email == req.Email && user.Password == req.Password
+	})).
 		Return(nil).Times(1)
 
 	user, err := suite.service.Register(context.Background(), req)
@@ -186,12 +218,13 @@ func (suite *UserServiceTestSuite) TestRefreshTokenSuccess() {
 	suite.mockRepo.On("GetUserByID", mock.Anything, userID).
 		Return(
 			&model.User{
-				ID:    userID,
-				Email: "test@test.com",
+				ID:           userID,
+				Email:        "test@test.com",
+				TokenVersion: 7,
 			}, nil,
 		).Times(1)
 
-	refreshToken, err := suite.service.RefreshToken(context.Background(), userID)
+	refreshToken, err := suite.service.RefreshToken(context.Background(), userID, 7)
 	suite.NotEmpty(refreshToken)
 	suite.Nil(err)
 }
@@ -201,9 +234,20 @@ func (suite *UserServiceTestSuite) TestRefreshTokenGetUserByIDFail() {
 	suite.mockRepo.On("GetUserByID", mock.Anything, userID).
 		Return(nil, errors.New("error")).Times(1)
 
-	refreshToken, err := suite.service.RefreshToken(context.Background(), userID)
+	refreshToken, err := suite.service.RefreshToken(context.Background(), userID, 0)
 	suite.Empty(refreshToken)
 	suite.NotNil(err)
+}
+
+func (suite *UserServiceTestSuite) TestRefreshTokenRejectsRevokedVersion() {
+	userID := "userID"
+	suite.mockRepo.On("GetUserByID", mock.Anything, userID).
+		Return(&model.User{ID: userID, TokenVersion: 2}, nil).Once()
+
+	accessToken, err := suite.service.RefreshToken(context.Background(), userID, 1)
+
+	suite.Empty(accessToken)
+	suite.ErrorIs(err, model.ErrRefreshTokenRevoked)
 }
 
 // ChangePassword
@@ -221,10 +265,12 @@ func (suite *UserServiceTestSuite) TestChangePasswordSuccess() {
 			&model.User{
 				ID:       userID,
 				Email:    "test@test.com",
-				Password: utils.HashAndSalt([]byte("password")),
+				Password: mustHashPassword(suite.T(), "password"),
 			}, nil,
 		).Times(1)
-	suite.mockRepo.On("Update", mock.Anything, mock.Anything).
+	suite.mockRepo.On("Update", mock.Anything, mock.MatchedBy(func(user *model.User) bool {
+		return user.TokenVersion == 1
+	})).
 		Return(nil).Times(1)
 
 	err := suite.service.ChangePassword(context.Background(), userID, req)
@@ -268,7 +314,7 @@ func (suite *UserServiceTestSuite) TestChangePasswordWrongCurrentPassword() {
 			&model.User{
 				ID:       userID,
 				Email:    "test@test.com",
-				Password: utils.HashAndSalt([]byte("password")),
+				Password: mustHashPassword(suite.T(), "password"),
 			}, nil,
 		).Times(1)
 
@@ -288,7 +334,7 @@ func (suite *UserServiceTestSuite) TestChangePasswordUpdateUserFail() {
 			&model.User{
 				ID:       userID,
 				Email:    "test@test.com",
-				Password: utils.HashAndSalt([]byte("password")),
+				Password: mustHashPassword(suite.T(), "password"),
 			}, nil,
 		).Times(1)
 	suite.mockRepo.On("Update", mock.Anything, mock.Anything).

@@ -13,6 +13,7 @@ import (
 	"goshop/internal/cart/model"
 	"goshop/internal/cart/service/mocks"
 	"goshop/pkg/config"
+	"goshop/pkg/middleware"
 	pb "goshop/proto/gen/go/cart"
 )
 
@@ -64,7 +65,7 @@ func (suite *CartHandlerTestSuite) TestCartAPI_AddProductSuccess() {
 		nil,
 	).Times(1)
 
-	ctx := context.WithValue(context.Background(), "userId", "userID")
+	ctx := middleware.ContextWithUserID(context.Background(), "userID")
 	res, err := suite.handler.AddProduct(ctx, req)
 
 	suite.Nil(err)
@@ -86,7 +87,7 @@ func (suite *CartHandlerTestSuite) TestCartAPI_AddProductFail() {
 		},
 	}).Return(nil, errors.New("error")).Times(1)
 
-	ctx := context.WithValue(context.Background(), "userId", "userID")
+	ctx := middleware.ContextWithUserID(context.Background(), "userID")
 	res, err := suite.handler.AddProduct(ctx, req)
 	suite.Nil(res)
 	suite.NotNil(err)
@@ -130,7 +131,7 @@ func (suite *CartHandlerTestSuite) TestCartAPI_RemoveProductSuccess() {
 		nil,
 	).Times(1)
 
-	ctx := context.WithValue(context.Background(), "userId", "userID")
+	ctx := middleware.ContextWithUserID(context.Background(), "userID")
 	res, err := suite.handler.RemoveProduct(ctx, req)
 
 	suite.Nil(err)
@@ -148,7 +149,7 @@ func (suite *CartHandlerTestSuite) TestCartAPI_RemoveProductFail() {
 		ProductID: "productId",
 	}).Return(nil, errors.New("error")).Times(1)
 
-	ctx := context.WithValue(context.Background(), "userId", "userID")
+	ctx := middleware.ContextWithUserID(context.Background(), "userID")
 	res, err := suite.handler.RemoveProduct(ctx, req)
 	suite.Nil(res)
 	suite.NotNil(err)
@@ -186,7 +187,7 @@ func (suite *CartHandlerTestSuite) TestCartAPI_GetCartSuccess() {
 		nil,
 	).Times(1)
 
-	ctx := context.WithValue(context.Background(), "userId", "userID")
+	ctx := middleware.ContextWithUserID(context.Background(), "userID")
 	res, err := suite.handler.GetCart(ctx, req)
 
 	suite.Nil(err)
@@ -199,7 +200,7 @@ func (suite *CartHandlerTestSuite) TestCartAPI_GetCartFail() {
 
 	suite.mockService.On("GetCartByUserID", mock.Anything, "userID").Return(nil, errors.New("error")).Times(1)
 
-	ctx := context.WithValue(context.Background(), "userId", "userID")
+	ctx := middleware.ContextWithUserID(context.Background(), "userID")
 	res, err := suite.handler.GetCart(ctx, req)
 	suite.Nil(res)
 	suite.NotNil(err)

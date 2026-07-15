@@ -32,10 +32,12 @@ type UnitOfWork interface {
 }
 
 type OrderRepository interface {
-	CreateOrder(ctx context.Context, userID string, lines []*model.OrderLine) (*model.Order, error)
+	CreateOrder(ctx context.Context, order *model.Order, lines []*model.OrderLine) (*model.Order, error)
 	GetOrderByID(ctx context.Context, id string, preload bool) (*model.Order, error)
+	GetOrderByIdempotencyKey(ctx context.Context, userID, keyHash string) (*model.Order, error)
 	GetMyOrders(ctx context.Context, req *dto.ListOrderReq) ([]*model.Order, *paging.Pagination, error)
 	UpdateOrder(ctx context.Context, order *model.Order) error
+	CancelOrderIfCancellable(ctx context.Context, orderID, userID string) error
 }
 
 type ProductRepository interface {

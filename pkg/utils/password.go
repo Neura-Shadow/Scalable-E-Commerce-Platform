@@ -1,17 +1,12 @@
 package utils
 
-import (
-	"log"
+import "golang.org/x/crypto/bcrypt"
 
-	"golang.org/x/crypto/bcrypt"
-)
-
-func HashAndSalt(pass []byte) string {
-	hashed, err := bcrypt.GenerateFromPassword(pass, bcrypt.MinCost)
+func HashAndSalt(pass []byte) (string, error) {
+	hashed, err := bcrypt.GenerateFromPassword(pass, bcrypt.DefaultCost)
 	if err != nil {
-		log.Printf("Failed to generate password: %v", err)
-		return ""
+		return "", err
 	}
 
-	return string(hashed)
+	return string(hashed), nil
 }

@@ -69,6 +69,16 @@ func (_m *IRedis) IsConnected() bool {
 	return r0
 }
 
+// Ping provides a mock function with given fields: ctx
+func (_m *IRedis) Ping(ctx context.Context) error {
+	ret := _m.Called(ctx)
+
+	if rf, ok := ret.Get(0).(func(context.Context) error); ok {
+		return rf(ctx)
+	}
+	return ret.Error(0)
+}
+
 // IncrementWithExpiration provides a mock function with given fields: key, expiration
 func (_m *IRedis) IncrementWithExpiration(key string, expiration time.Duration) (int64, error) {
 	ret := _m.Called(key, expiration)

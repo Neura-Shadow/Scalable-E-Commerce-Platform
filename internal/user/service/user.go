@@ -20,7 +20,7 @@ type IUserService interface {
 	Login(ctx context.Context, req *dto.LoginReq) (*model.User, string, string, error)
 	Register(ctx context.Context, req *dto.RegisterReq) (*model.User, error)
 	GetUserByID(ctx context.Context, id string) (*model.User, error)
-	RefreshToken(ctx context.Context, userID string) (string, error)
+	RefreshToken(ctx context.Context, userID string, tokenVersion uint64) (string, error)
 	ChangePassword(ctx context.Context, id string, req *dto.ChangePasswordReq) error
 }
 
@@ -45,18 +45,21 @@ func (s *UserService) Login(ctx context.Context, req *dto.LoginReq) (*model.User
 
 	user, err := s.repo.GetUserByEmail(ctx, req.Email)
 	if err != nil {
-		logger.Errorf("Login.GetUserByEmail fail, email: %s, error: %s", req.Email, err)
+		logger.Errorf("Login.GetUserByEmail failed: %s", err)
 		return nil, "", "", err
 	}
 
 	if err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password)); err != nil {
 		return nil, "", "", errors.New("wrong password")
 	}
+	if err := s.upgradePasswordHash(ctx, user, req.Password); err != nil {
+		return nil, "", "", err
+	}
 
 	tokenData := map[string]interface{}{
-		"id":    user.ID,
-		"email": user.Email,
-		"role":  user.Role,
+		"id":                     user.ID,
+		"role":                   user.Role,
+		jtoken.TokenVersionClaim: user.TokenVersion,
 	}
 	accessToken := jtoken.GenerateAccessToken(tokenData)
 	refreshToken := jtoken.GenerateRefreshToken(tokenData)
@@ -68,11 +71,13 @@ func (s *UserService) Register(ctx context.Context, req *dto.RegisterReq) (*mode
 		return nil, err
 	}
 
-	var user model.User
-	utils.Copy(&user, &req)
+	user := model.User{
+		Email:    req.Email,
+		Password: req.Password,
+	}
 	err := s.repo.Create(ctx, &user)
 	if err != nil {
-		logger.Errorf("Register.Create fail, email: %s, error: %s", req.Email, err)
+		logger.Errorf("Register.Create failed: %s", err)
 		return nil, err
 	}
 	return &user, nil
@@ -88,17 +93,20 @@ func (s *UserService) GetUserByID(ctx context.Context, id string) (*model.User, 
 	return user, nil
 }
 
-func (s *UserService) RefreshToken(ctx context.Context, userID string) (string, error) {
+func (s *UserService) RefreshToken(ctx context.Context, userID string, tokenVersion uint64) (string, error) {
 	user, err := s.repo.GetUserByID(ctx, userID)
 	if err != nil {
 		logger.Errorf("RefreshToken.GetUserByID fail, id: %s, error: %s", userID, err)
 		return "", err
 	}
+	if user.TokenVersion != tokenVersion {
+		return "", model.ErrRefreshTokenRevoked
+	}
 
 	tokenData := map[string]interface{}{
-		"id":    user.ID,
-		"email": user.Email,
-		"role":  user.Role,
+		"id":                     user.ID,
+		"role":                   user.Role,
+		jtoken.TokenVersionClaim: user.TokenVersion,
 	}
 	accessToken := jtoken.GenerateAccessToken(tokenData)
 	return accessToken, nil
@@ -118,12 +126,38 @@ func (s *UserService) ChangePassword(ctx context.Context, id string, req *dto.Ch
 		return errors.New("wrong password")
 	}
 
-	user.Password = utils.HashAndSalt([]byte(req.NewPassword))
+	hashedPassword, err := utils.HashAndSalt([]byte(req.NewPassword))
+	if err != nil {
+		return err
+	}
+	user.Password = hashedPassword
+	user.TokenVersion++
 	err = s.repo.Update(ctx, user)
 	if err != nil {
 		logger.Errorf("ChangePassword.Update fail, id: %s, error: %s", id, err)
 		return err
 	}
 
+	return nil
+}
+
+func (s *UserService) upgradePasswordHash(ctx context.Context, user *model.User, password string) error {
+	cost, err := bcrypt.Cost([]byte(user.Password))
+	if err != nil {
+		return err
+	}
+	if cost >= bcrypt.DefaultCost {
+		return nil
+	}
+
+	hashedPassword, err := utils.HashAndSalt([]byte(password))
+	if err != nil {
+		return err
+	}
+	user.Password = hashedPassword
+	if err := s.repo.Update(ctx, user); err != nil {
+		logger.Errorf("Login.UpdatePasswordHash failed: %s", err)
+		return err
+	}
 	return nil
 }

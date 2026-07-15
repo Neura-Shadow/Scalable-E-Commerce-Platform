@@ -19,6 +19,7 @@ type IInventoryRepository interface {
 	GetByProductID(ctx context.Context, productID string) (*model.Inventory, error)
 	Create(ctx context.Context, inventory *model.Inventory) error
 	Update(ctx context.Context, inventory *model.Inventory) error
+	AdjustStock(ctx context.Context, productID string, quantityDelta int64) (*model.Inventory, bool, error)
 	ConsumeStock(ctx context.Context, productID string, quantity int64) (bool, error)
 	Restock(ctx context.Context, productID string, quantity int64) error
 }
@@ -89,6 +90,44 @@ func (r *InventoryRepo) Create(ctx context.Context, inventory *model.Inventory) 
 
 func (r *InventoryRepo) Update(ctx context.Context, inventory *model.Inventory) error {
 	return r.db.Update(ctx, inventory)
+}
+
+func (r *InventoryRepo) AdjustStock(ctx context.Context, productID string, quantityDelta int64) (*model.Inventory, bool, error) {
+	if quantityDelta > 0 {
+		inventory := &model.Inventory{ProductID: productID, Quantity: quantityDelta}
+		result := r.db.GetDB().
+			WithContext(ctx).
+			Clauses(
+				clause.OnConflict{
+					Columns: []clause.Column{{Name: "product_id"}},
+					DoUpdates: clause.Assignments(map[string]interface{}{
+						"quantity":   gorm.Expr("inventories.quantity + EXCLUDED.quantity"),
+						"updated_at": gorm.Expr("CURRENT_TIMESTAMP"),
+					}),
+				},
+				clause.Returning{},
+			).
+			Create(inventory)
+		if result.Error != nil {
+			return nil, false, result.Error
+		}
+		return inventory, result.RowsAffected == 1, nil
+	}
+
+	inventory := new(model.Inventory)
+	result := r.db.GetDB().
+		WithContext(ctx).
+		Model(inventory).
+		Clauses(clause.Returning{}).
+		Where("product_id = ? AND quantity + ? >= 0", productID, quantityDelta).
+		Updates(map[string]interface{}{
+			"quantity":   gorm.Expr("quantity + ?", quantityDelta),
+			"updated_at": gorm.Expr("CURRENT_TIMESTAMP"),
+		})
+	if result.Error != nil {
+		return nil, false, result.Error
+	}
+	return inventory, result.RowsAffected == 1, nil
 }
 
 func (r *InventoryRepo) ConsumeStock(ctx context.Context, productID string, quantity int64) (bool, error) {

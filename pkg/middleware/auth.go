@@ -3,12 +3,15 @@ package middleware
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
 	"goshop/pkg/jtoken"
 	"goshop/pkg/response"
 )
+
+const tokenVersionGinKey = "tokenVersion"
 
 func JWTAuth() gin.HandlerFunc {
 	return JWT(jtoken.AccessTokenType)
@@ -45,8 +48,30 @@ func JWT(tokenType string) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		c.Set("userId", payload["id"])
+		userID, ok := payload["id"].(string)
+		if !ok || strings.TrimSpace(userID) == "" {
+			c.JSON(http.StatusUnauthorized, nil)
+			c.Abort()
+			return
+		}
+		tokenVersion, err := jtoken.TokenVersion(payload)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, nil)
+			c.Abort()
+			return
+		}
+		c.Set("userId", userID)
 		c.Set("role", payload["role"])
+		c.Set(tokenVersionGinKey, tokenVersion)
 		c.Next()
 	}
+}
+
+func TokenVersionFromGinContext(c *gin.Context) (uint64, bool) {
+	tokenVersion, ok := c.Get(tokenVersionGinKey)
+	if !ok {
+		return 0, false
+	}
+	value, ok := tokenVersion.(uint64)
+	return value, ok
 }

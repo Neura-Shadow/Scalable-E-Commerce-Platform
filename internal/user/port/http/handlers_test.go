@@ -276,8 +276,9 @@ func (suite *UserHandlerTestSuite) TestGetMeFail() {
 func (suite *UserHandlerTestSuite) TestRefreshTokenSuccess() {
 	ctx, writer := suite.prepareContext(nil)
 	ctx.Set("userId", "123456")
+	ctx.Set("tokenVersion", uint64(0))
 
-	suite.mockService.On("RefreshToken", mock.Anything, "123456").
+	suite.mockService.On("RefreshToken", mock.Anything, "123456", uint64(0)).
 		Return("access-token", nil).Times(1)
 
 	suite.handler.RefreshToken(ctx)
@@ -304,8 +305,9 @@ func (suite *UserHandlerTestSuite) TestRefreshTokenUnauthorized() {
 func (suite *UserHandlerTestSuite) TestRefreshTokenFail() {
 	ctx, writer := suite.prepareContext(nil)
 	ctx.Set("userId", "123456")
+	ctx.Set("tokenVersion", uint64(0))
 
-	suite.mockService.On("RefreshToken", mock.Anything, "123456").
+	suite.mockService.On("RefreshToken", mock.Anything, "123456", uint64(0)).
 		Return("", errors.New("error")).Times(1)
 
 	suite.handler.RefreshToken(ctx)

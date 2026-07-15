@@ -1,0 +1,3 @@
+-- Intentionally irreversible: automatically relaxing NOT NULL/default contracts
+-- would make both fresh and adopted production schemas less safe. Rolling back the
+-- application to migration version 3 remains compatible with these stricter columns.

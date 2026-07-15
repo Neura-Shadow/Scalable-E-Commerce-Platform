@@ -8,7 +8,9 @@ import (
 	"github.com/quangdangfit/gocommon/logger"
 
 	"goshop/internal/user/dto"
+	"goshop/internal/user/model"
 	"goshop/internal/user/service"
+	"goshop/pkg/middleware"
 	"goshop/pkg/response"
 	"goshop/pkg/utils"
 )
@@ -114,10 +116,19 @@ func (h *UserHandler) RefreshToken(c *gin.Context) {
 		response.Error(c, http.StatusUnauthorized, errors.New("unauthorized"), "Unauthorized")
 		return
 	}
+	tokenVersion, ok := middleware.TokenVersionFromGinContext(c)
+	if !ok {
+		response.Error(c, http.StatusUnauthorized, errors.New("unauthorized"), "Unauthorized")
+		return
+	}
 
-	accessToken, err := h.service.RefreshToken(c, userID)
+	accessToken, err := h.service.RefreshToken(c, userID, tokenVersion)
 	if err != nil {
 		logger.Error("Failed to refresh token", err)
+		if errors.Is(err, model.ErrRefreshTokenRevoked) {
+			response.Error(c, http.StatusUnauthorized, err, "Unauthorized")
+			return
+		}
 		response.Error(c, http.StatusInternalServerError, err, "Something went wrong")
 		return
 	}

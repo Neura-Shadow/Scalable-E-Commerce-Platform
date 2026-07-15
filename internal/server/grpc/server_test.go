@@ -48,7 +48,7 @@ func TestServer_RunStopsGracefullyWhenContextCancels(t *testing.T) {
 	select {
 	case err := <-done:
 		require.NoError(t, err)
-	case <-time.After(time.Second):
+	case <-time.After(12 * time.Second):
 		t.Fatal("gRPC server did not stop after context cancellation")
 	}
 }

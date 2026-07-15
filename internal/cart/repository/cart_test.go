@@ -5,141 +5,72 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/quangdangfit/gocommon/logger"
 	"github.com/stretchr/testify/mock"
-	"github.com/stretchr/testify/suite"
+	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 
 	"goshop/internal/cart/model"
-	"goshop/pkg/config"
 	"goshop/pkg/dbs/mocks"
 )
 
-type CartRepositoryTestSuite struct {
-	suite.Suite
-	mockDB *mocks.IDatabase
-	repo   ICartRepository
-}
-
-func (suite *CartRepositoryTestSuite) SetupTest() {
-	logger.Initialize(config.ProductionEnv)
-
-	suite.mockDB = mocks.NewIDatabase(suite.T())
-	suite.repo = NewCartRepository(suite.mockDB)
-}
-
-func TestCartRepositoryTestSuite(t *testing.T) {
-	suite.Run(t, new(CartRepositoryTestSuite))
-}
-
-// Create
-// =================================================================
-
-func (suite *CartRepositoryTestSuite) TestCreateCartSuccessfully() {
-	cart := &model.Cart{
-		UserID: "userID",
-		Lines: []*model.CartLine{
-			{
-				ProductID: "productID1",
-				Quantity:  4,
-			},
-			{
-				ProductID: "productID2",
-				Quantity:  3,
-			},
+func TestCartRepositoryTransactionErrorsArePropagated(t *testing.T) {
+	tests := map[string]func(context.Context, ICartRepository) (*model.Cart, error){
+		"get or create": func(ctx context.Context, repository ICartRepository) (*model.Cart, error) {
+			return repository.GetOrCreateCart(ctx, "user-1")
+		},
+		"add product": func(ctx context.Context, repository ICartRepository) (*model.Cart, error) {
+			return repository.AddProduct(ctx, "user-1", "product-1", 1)
+		},
+		"remove product": func(ctx context.Context, repository ICartRepository) (*model.Cart, error) {
+			return repository.RemoveProduct(ctx, "user-1", "product-1")
 		},
 	}
-	suite.mockDB.On("Create", mock.Anything, cart).
-		Return(nil).Times(1)
 
-	err := suite.repo.Create(context.Background(), cart)
-	suite.Nil(err)
-}
+	for name, operation := range tests {
+		t.Run(name, func(t *testing.T) {
+			database := mocks.NewIDatabase(t)
+			repository := NewCartRepository(database)
+			expectedErr := errors.New("transaction failed")
+			database.On("WithTransactionContext", mock.Anything, mock.Anything).Return(expectedErr).Once()
 
-func (suite *CartRepositoryTestSuite) TestCreateCartFail() {
-	cart := &model.Cart{
-		UserID: "userID",
-		Lines: []*model.CartLine{
-			{
-				ProductID: "productID1",
-				Quantity:  4,
-			},
-			{
-				ProductID: "productID2",
-				Quantity:  3,
-			},
-		},
+			cart, err := operation(context.Background(), repository)
+
+			require.Nil(t, cart)
+			require.ErrorIs(t, err, expectedErr)
+		})
 	}
-	suite.mockDB.On("Create", mock.Anything, cart).
-		Return(errors.New("error")).Times(1)
-
-	err := suite.repo.Create(context.Background(), cart)
-	suite.NotNil(err)
 }
 
-// Update
-// =================================================================
+func TestCartRepositoryGetByUserID(t *testing.T) {
+	database := mocks.NewIDatabase(t)
+	repository := NewCartRepository(database)
+	database.On("FindOne", mock.Anything, &model.Cart{}, mock.Anything, mock.Anything).Return(nil).Once()
 
-func (suite *CartRepositoryTestSuite) TestUpdateCartSuccessfully() {
-	cart := &model.Cart{
-		ID:     "cartId1",
-		UserID: "userID",
-		Lines: []*model.CartLine{
-			{
-				ProductID: "productID1",
-				Quantity:  4,
-			},
-			{
-				ProductID: "productID2",
-				Quantity:  3,
-			},
-		},
-	}
-	suite.mockDB.On("Update", mock.Anything, cart).
-		Return(nil).Times(1)
+	cart, err := repository.GetCartByUserID(context.Background(), "user-1")
 
-	err := suite.repo.Update(context.Background(), cart)
-	suite.Nil(err)
+	require.NoError(t, err)
+	require.NotNil(t, cart)
 }
 
-func (suite *CartRepositoryTestSuite) TestUpdateCartFail() {
-	cart := &model.Cart{
-		ID:     "cartId1",
-		UserID: "userID",
-		Lines: []*model.CartLine{
-			{
-				ProductID: "productID1",
-				Quantity:  4,
-			},
-			{
-				ProductID: "productID2",
-				Quantity:  3,
-			},
-		},
-	}
-	suite.mockDB.On("Update", mock.Anything, cart).
-		Return(errors.New("error")).Times(1)
+func TestCartRepositoryGetByUserIDPropagatesDatabaseError(t *testing.T) {
+	database := mocks.NewIDatabase(t)
+	repository := NewCartRepository(database)
+	expectedErr := errors.New("database unavailable")
+	database.On("FindOne", mock.Anything, &model.Cart{}, mock.Anything, mock.Anything).Return(expectedErr).Once()
 
-	err := suite.repo.Update(context.Background(), cart)
-	suite.NotNil(err)
+	cart, err := repository.GetCartByUserID(context.Background(), "user-1")
+
+	require.Nil(t, cart)
+	require.ErrorIs(t, err, expectedErr)
 }
 
-// GetCartByUserID
-// =================================================================
+func TestCartRepositoryGetByUserIDMapsNotFound(t *testing.T) {
+	database := mocks.NewIDatabase(t)
+	repository := NewCartRepository(database)
+	database.On("FindOne", mock.Anything, &model.Cart{}, mock.Anything, mock.Anything).Return(gorm.ErrRecordNotFound).Once()
 
-func (suite *CartRepositoryTestSuite) TestGetCartByUserIDSuccessfully() {
-	suite.mockDB.On("FindOne", mock.Anything, &model.Cart{}, mock.Anything, mock.Anything).
-		Return(nil).Times(1)
+	cart, err := repository.GetCartByUserID(context.Background(), "user-1")
 
-	cart, err := suite.repo.GetCartByUserID(context.Background(), "userId")
-	suite.Nil(err)
-	suite.NotNil(cart)
-}
-
-func (suite *CartRepositoryTestSuite) TestGetCartByUserIDFail() {
-	suite.mockDB.On("FindOne", mock.Anything, &model.Cart{}, mock.Anything, mock.Anything).
-		Return(errors.New("error")).Times(1)
-
-	cart, err := suite.repo.GetCartByUserID(context.Background(), "userId")
-	suite.NotNil(err)
-	suite.Nil(cart)
+	require.Nil(t, cart)
+	require.ErrorIs(t, err, model.ErrCartNotFound)
 }

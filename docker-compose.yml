@@ -1,28 +1,105 @@
+name: goshop
+
 services:
   postgres:
-    image: postgres:16-alpine
-    container_name: goshop-postgres
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: goshop_test
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-goshop_test}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d goshop_test"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 20
+    security_opt:
+      - no-new-privileges:true
 
   redis:
-    image: redis:7-alpine
-    container_name: goshop-redis
+    image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
     restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 20
+    security_opt:
+      - no-new-privileges:true
+
+  migrate:
+    image: migrate/migrate:v4.18.3@sha256:39b59b389634e43bb3f2d4e94bc1edef0775ec2a9a3540ce6a2cf330e5daae55
+    profiles: ["application"]
+    volumes:
+      - ./migrations:/migrations:ro
+    command:
+      - -path=/migrations
+      - -database=${DATABASE_URI:?DATABASE_URI must be set}
+      - up
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+
+  api:
+    build:
+      context: .
+    image: scalable-ecommerce-platform:v1.0.0
+    profiles: ["application"]
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      environment: production
+      http_port: 8888
+      grpc_port: 8889
+      grpc_reflection_enabled: "false"
+      swagger_enabled: ${SWAGGER_ENABLED:-false}
+      auth_secret: ${AUTH_SECRET:?AUTH_SECRET must be set}
+      database_uri: ${DATABASE_URI:?DATABASE_URI must be set}
+      database_auto_migrate: "false"
+      database_max_open_conns: 25
+      database_max_idle_conns: 5
+      database_conn_max_lifetime_seconds: 300
+      database_conn_max_idle_time_seconds: 60
+      redis_uri: redis:6379
+      redis_password: ""
+      redis_db: 0
+      metrics_enabled: ${METRICS_ENABLED:-false}
+      outbox_publisher_enabled: "true"
+      outbox_publisher_type: redis_stream
+      outbox_consumer_enabled: "true"
+    ports:
+      - "8888:8888"
+      - "8889:8889"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8888/livez"]
+      interval: 10s
+      timeout: 2s
+      start_period: 10s
+      retries: 5
+    restart: unless-stopped
+    stop_grace_period: 15s
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  postgres-data:
+  redis-data:

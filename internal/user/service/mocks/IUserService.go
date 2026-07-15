@@ -96,23 +96,23 @@ func (_m *IUserService) Login(ctx context.Context, req *dto.LoginReq) (*model.Us
 	return r0, r1, r2, r3
 }
 
-// RefreshToken provides a mock function with given fields: ctx, userID
-func (_m *IUserService) RefreshToken(ctx context.Context, userID string) (string, error) {
-	ret := _m.Called(ctx, userID)
+// RefreshToken provides a mock function with given fields: ctx, userID, tokenVersion
+func (_m *IUserService) RefreshToken(ctx context.Context, userID string, tokenVersion uint64) (string, error) {
+	ret := _m.Called(ctx, userID, tokenVersion)
 
 	var r0 string
 	var r1 error
-	if rf, ok := ret.Get(0).(func(context.Context, string) (string, error)); ok {
-		return rf(ctx, userID)
+	if rf, ok := ret.Get(0).(func(context.Context, string, uint64) (string, error)); ok {
+		return rf(ctx, userID, tokenVersion)
 	}
-	if rf, ok := ret.Get(0).(func(context.Context, string) string); ok {
-		r0 = rf(ctx, userID)
+	if rf, ok := ret.Get(0).(func(context.Context, string, uint64) string); ok {
+		r0 = rf(ctx, userID, tokenVersion)
 	} else {
 		r0 = ret.Get(0).(string)
 	}
 
-	if rf, ok := ret.Get(1).(func(context.Context, string) error); ok {
-		r1 = rf(ctx, userID)
+	if rf, ok := ret.Get(1).(func(context.Context, string, uint64) error); ok {
+		r1 = rf(ctx, userID, tokenVersion)
 	} else {
 		r1 = ret.Error(1)
 	}
